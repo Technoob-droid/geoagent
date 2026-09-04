@@ -1,0 +1,83 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.venv
+venv/
+ENV/
+
+# Data & SQLite / DuckDB
+*.duckdb
+*.duckdb.tmp
+*.db
+*.sqlite
+backend/app/data/storage/*
+!backend/app/data/storage/.gitkeep
+
+# Environment variables
+.env
+.env.local
+
+# Node / Vite
+node_modules/
+dist/
+dist-ssr/
+*.local
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Dependencies
+node_modules/
+frontend/node_modules/
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+
+# Build outputs
+frontend/dist/
+frontend/build/
+
+# DuckDB data & local storage
+*.duckdb
+*.duckdb.wal
+*.db
+
+# Environment variables & secrets
+.env
+.env.local
+*.local
+
+# IDE & OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

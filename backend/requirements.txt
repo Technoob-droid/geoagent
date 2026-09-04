@@ -1,0 +1,23 @@
+# Web Framework & Networking
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+pydantic>=2.7.0
+pydantic-settings>=2.2.0
+python-dotenv>=1.0.1
+httpx>=0.27.0
+
+# Agentic AI & Graph Orchestration
+langchain>=0.2.0
+langchain-core>=0.2.0
+langgraph>=0.1.0
+langchain-openai>=0.1.7
+
+# Geospatial Engine & Data Processing
+duckdb>=1.0.0
+geopandas>=1.0.0
+shapely>=2.0.4
+pyproj>=3.6.1
+
+# Development & Testing
+pytest>=8.2.0
+pytest-asyncio>=0.23.0
