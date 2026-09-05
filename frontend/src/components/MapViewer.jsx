@@ -1,18 +1,46 @@
 import React, { useEffect, useRef, useState } from 'react';
 import maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
+import { Ruler, Pentagon, MapPin, X } from 'lucide-react';
+
+const CURRENT_LOCATION = [88.3639, 22.5726]; // Kolkata coordinates [lng, lat]
 
 const PALETTE = [
-  { fill: '#38bdf8', stroke: '#0284c7' }, // Sky
-  { fill: '#a855f7', stroke: '#7e22ce' }, // Purple
-  { fill: '#f43f5e', stroke: '#be123c' }, // Rose
-  { fill: '#10b981', stroke: '#047857' }, // Emerald
-  { fill: '#f59e0b', stroke: '#b45309' }, // Amber
-  { fill: '#6366f1', stroke: '#4338ca' }  // Indigo
+  { fill: '#38bdf8', stroke: '#0284c7' },
+  { fill: '#a855f7', stroke: '#7e22ce' },
+  { fill: '#f43f5e', stroke: '#be123c' },
+  { fill: '#10b981', stroke: '#047857' },
+  { fill: '#f59e0b', stroke: '#b45309' },
+  { fill: '#6366f1', stroke: '#4338ca' }
 ];
 
 function getLayerColor(index) {
   return PALETTE[index % PALETTE.length];
+}
+
+function haversineDistance(c1, c2) {
+  const toRad = (v) => (v * Math.PI) / 180;
+  const R = 6371;
+  const dLat = toRad(c2[1] - c1[1]);
+  const dLng = toRad(c2[0] - c1[0]);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(c1[1])) * Math.cos(toRad(c2[1])) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(a));
+}
+
+function calculatePolygonArea(coords) {
+  if (coords.length < 3) return 0;
+  const toRad = (v) => (v * Math.PI) / 180;
+  const R = 6371;
+  let total = 0;
+
+  for (let i = 0; i < coords.length; i++) {
+    const p1 = coords[i];
+    const p2 = coords[(i + 1) % coords.length];
+    total += toRad(p2[0] - p1[0]) * (2 + Math.sin(toRad(p1[1])) + Math.sin(toRad(p2[1])));
+  }
+  return Math.abs((total * R * R) / 2);
 }
 
 function computeBBox(geojson) {
@@ -56,6 +84,18 @@ export default function MapViewer({
   const loadedLayersRef = useRef(new Map());
   const initialZoomDoneRef = useRef(false);
 
+  // User coordinate tracking (defaults to central Kolkata)
+  const [userCoord, setUserCoord] = useState(CURRENT_LOCATION);
+  const userCoordRef = useRef(CURRENT_LOCATION);
+  userCoordRef.current = userCoord;
+
+  // Measurement tool state
+  const [measureMode, setMeasureMode] = useState(null);
+  const [measurePoints, setMeasurePoints] = useState([]);
+  const [measureResult, setMeasureResult] = useState(null);
+  const measurePointsRef = useRef([]);
+  measurePointsRef.current = measurePoints;
+
   // Initialize Map
   useEffect(() => {
     if (mapRef.current) return;
@@ -63,13 +103,117 @@ export default function MapViewer({
     const map = new maplibregl.Map({
       container: mapContainer.current,
       style: 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json',
-      center: [88.3639, 22.5726],
+      center: CURRENT_LOCATION,
       zoom: 11
     });
 
     map.addControl(new maplibregl.NavigationControl(), 'bottom-right');
 
+    const geolocate = new maplibregl.GeolocateControl({
+      positionOptions: { enableHighAccuracy: true },
+      trackUserLocation: true,
+      showUserLocation: true
+    });
+    map.addControl(geolocate, 'bottom-right');
+
+    geolocate.on('geolocate', (pos) => {
+      const coords = [pos.coords.longitude, pos.coords.latitude];
+      setUserCoord(coords);
+      const src = map.getSource('user-current-location');
+      if (src) {
+        src.setData({
+          type: 'FeatureCollection',
+          features: [
+            {
+              type: 'Feature',
+              geometry: { type: 'Point', coordinates: coords },
+              properties: { title: 'My Current Location' }
+            }
+          ]
+        });
+      }
+    });
+
     map.on('load', () => {
+      // User location source & pulsing halo
+      map.addSource('user-current-location', {
+        type: 'geojson',
+        data: {
+          type: 'FeatureCollection',
+          features: [
+            {
+              type: 'Feature',
+              geometry: { type: 'Point', coordinates: CURRENT_LOCATION },
+              properties: { title: 'My Current Location' }
+            }
+          ]
+        }
+      });
+
+      map.addLayer({
+        id: 'user-location-halo',
+        type: 'circle',
+        source: 'user-current-location',
+        paint: {
+          'circle-radius': 22,
+          'circle-color': '#38bdf8',
+          'circle-opacity': 0.25,
+          'circle-stroke-width': 1.5,
+          'circle-stroke-color': '#0284c7'
+        }
+      });
+
+      map.addLayer({
+        id: 'user-location-center',
+        type: 'circle',
+        source: 'user-current-location',
+        paint: {
+          'circle-radius': 8,
+          'circle-color': '#0ea5e9',
+          'circle-stroke-width': 3,
+          'circle-stroke-color': '#ffffff'
+        }
+      });
+
+      // Measurement overlay source & layers
+      map.addSource('measure-geojson', {
+        type: 'geojson',
+        data: { type: 'FeatureCollection', features: [] }
+      });
+
+      map.addLayer({
+        id: 'measure-polygon',
+        type: 'fill',
+        source: 'measure-geojson',
+        paint: {
+          'fill-color': '#ec4899',
+          'fill-opacity': 0.25
+        }
+      });
+
+      map.addLayer({
+        id: 'measure-lines',
+        type: 'line',
+        source: 'measure-geojson',
+        paint: {
+          'line-color': '#ec4899',
+          'line-width': 2.5,
+          'line-dasharray': [2, 1.5]
+        }
+      });
+
+      map.addLayer({
+        id: 'measure-points',
+        type: 'circle',
+        source: 'measure-geojson',
+        paint: {
+          'circle-radius': 5,
+          'circle-color': '#ffffff',
+          'circle-stroke-width': 2,
+          'circle-stroke-color': '#ec4899'
+        }
+      });
+
       mapRef.current = map;
       setMapReady(true);
     });
@@ -88,6 +232,8 @@ export default function MapViewer({
 
     // Feature Click Popup & Cluster Zoom
     map.on('click', (e) => {
+      if (measurePointsRef.current.modeActive) return;
+
       const allInteractiveLayers = [];
       loadedLayersRef.current.forEach((_, layerId) => {
         [
@@ -115,7 +261,6 @@ export default function MapViewer({
       const topFeature = features[0];
       const clickedLayerId = topFeature.layer.id;
 
-      // Click on cluster -> zoom into cluster
       if (clickedLayerId.endsWith('-cluster-circles')) {
         const sourceName = topFeature.layer.source;
         const source = map.getSource(sourceName);
@@ -131,7 +276,6 @@ export default function MapViewer({
         return;
       }
 
-      // Format feature properties into a clean dark table
       const props = topFeature.properties || {};
       const layerBaseName = clickedLayerId.replace(
         /-point-circle|-unclustered-points|-polygon-fill|-line|-cluster-circles/g,
@@ -139,7 +283,7 @@ export default function MapViewer({
       );
 
       const rows = Object.entries(props)
-        .filter(([key]) => key !== 'cluster' && key !== 'cluster_id' && key !== 'point_count' && key !== 'point_count_abbreviated')
+        .filter(([k]) => !['cluster', 'cluster_id', 'point_count', 'point_count_abbreviated'].includes(k))
         .map(
           ([k, v]) => `
           <tr style="border-bottom: 1px solid rgba(255,255,255,0.06);">
@@ -174,32 +318,6 @@ export default function MapViewer({
         .addTo(map);
     });
 
-    // Pointer cursor on hover over features
-    map.on('mousemove', (e) => {
-      const allInteractiveLayers = [];
-      loadedLayersRef.current.forEach((_, layerId) => {
-        [
-          `${layerId}-cluster-circles`,
-          `${layerId}-point-circle`,
-          `${layerId}-unclustered-points`,
-          `${layerId}-polygon-fill`,
-          `${layerId}-line`
-        ].forEach((subId) => {
-          if (map.getLayer(subId)) allInteractiveLayers.push(subId);
-        });
-      });
-
-      if (allInteractiveLayers.length === 0) {
-        map.getCanvas().style.cursor = '';
-        return;
-      }
-
-      const features = map.queryRenderedFeatures(e.point, {
-        layers: allInteractiveLayers
-      });
-      map.getCanvas().style.cursor = features.length > 0 ? 'pointer' : '';
-    });
-
     return () => {
       if (popupRef.current) popupRef.current.remove();
       map.remove();
@@ -207,7 +325,7 @@ export default function MapViewer({
     };
   }, []);
 
-  // Synchronize Spatial Layers
+  // Synchronize Map Layers from Server
   useEffect(() => {
     if (!mapReady || !mapRef.current) return;
     const map = mapRef.current;
@@ -215,7 +333,6 @@ export default function MapViewer({
     const syncLayers = async () => {
       const currentIds = new Set(layers.map((l) => l.layer_id));
 
-      // 1. Remove deleted layers
       for (const [id] of loadedLayersRef.current.entries()) {
         if (!currentIds.has(id)) {
           [
@@ -235,7 +352,6 @@ export default function MapViewer({
         }
       }
 
-      // 2. Load active layers
       for (let i = 0; i < layers.length; i++) {
         const layer = layers[i];
         const layerId = layer.layer_id;
@@ -261,15 +377,12 @@ export default function MapViewer({
             });
 
             if (isPoint) {
-              // Points
               map.addLayer({
                 id: `${layerId}-point-circle`,
                 type: 'circle',
                 source: layerId,
                 filter: ['!', ['has', 'point_count']],
-                layout: {
-                  visibility: !isHidden && mode === 'points' ? 'visible' : 'none'
-                },
+                layout: { visibility: !isHidden && mode === 'points' ? 'visible' : 'none' },
                 paint: {
                   'circle-radius': 8,
                   'circle-color': color.fill,
@@ -279,25 +392,15 @@ export default function MapViewer({
                 }
               });
 
-              // Heatmap
               map.addLayer({
                 id: `${layerId}-heatmap`,
                 type: 'heatmap',
                 source: layerId,
                 maxzoom: 17,
-                layout: {
-                  visibility: !isHidden && mode === 'heatmap' ? 'visible' : 'none'
-                },
+                layout: { visibility: !isHidden && mode === 'heatmap' ? 'visible' : 'none' },
                 paint: {
                   'heatmap-weight': 1,
-                  'heatmap-intensity': [
-                    'interpolate',
-                    ['linear'],
-                    ['zoom'],
-                    0, 2,
-                    9, 4,
-                    15, 8
-                  ],
+                  'heatmap-intensity': ['interpolate', ['linear'], ['zoom'], 0, 2, 9, 4, 15, 8],
                   'heatmap-color': [
                     'interpolate',
                     ['linear'],
@@ -309,49 +412,26 @@ export default function MapViewer({
                     0.7, '#fb923c',
                     1.0, '#f43f5e'
                   ],
-                  'heatmap-radius': [
-                    'interpolate',
-                    ['linear'],
-                    ['zoom'],
-                    0, 25,
-                    10, 50,
-                    15, 100
-                  ],
+                  'heatmap-radius': ['interpolate', ['linear'], ['zoom'], 0, 25, 10, 50, 15, 100],
                   'heatmap-opacity': alpha
                 }
               });
 
-              // Cluster circles
               map.addLayer({
                 id: `${layerId}-cluster-circles`,
                 type: 'circle',
                 source: layerId,
                 filter: ['has', 'point_count'],
-                layout: {
-                  visibility: !isHidden && mode === 'clusters' ? 'visible' : 'none'
-                },
+                layout: { visibility: !isHidden && mode === 'clusters' ? 'visible' : 'none' },
                 paint: {
-                  'circle-color': [
-                    'step',
-                    ['get', 'point_count'],
-                    color.fill,
-                    5, '#6366f1',
-                    20, '#f43f5e'
-                  ],
-                  'circle-radius': [
-                    'step',
-                    ['get', 'point_count'],
-                    18,
-                    5, 24,
-                    20, 32
-                  ],
+                  'circle-color': ['step', ['get', 'point_count'], color.fill, 5, '#6366f1', 20, '#f43f5e'],
+                  'circle-radius': ['step', ['get', 'point_count'], 18, 5, 24, 20, 32],
                   'circle-opacity': alpha,
                   'circle-stroke-width': 2,
                   'circle-stroke-color': '#ffffff'
                 }
               });
 
-              // Cluster count labels
               map.addLayer({
                 id: `${layerId}-cluster-counts`,
                 type: 'symbol',
@@ -362,20 +442,15 @@ export default function MapViewer({
                   'text-field': '{point_count_abbreviated}',
                   'text-size': 13
                 },
-                paint: {
-                  'text-color': '#ffffff'
-                }
+                paint: { 'text-color': '#ffffff' }
               });
 
-              // Unclustered points in cluster mode
               map.addLayer({
                 id: `${layerId}-unclustered-points`,
                 type: 'circle',
                 source: layerId,
                 filter: ['!', ['has', 'point_count']],
-                layout: {
-                  visibility: !isHidden && mode === 'clusters' ? 'visible' : 'none'
-                },
+                layout: { visibility: !isHidden && mode === 'clusters' ? 'visible' : 'none' },
                 paint: {
                   'circle-color': color.fill,
                   'circle-radius': 7,
@@ -389,9 +464,7 @@ export default function MapViewer({
                 id: `${layerId}-line`,
                 type: 'line',
                 source: layerId,
-                layout: {
-                  visibility: isHidden ? 'none' : 'visible'
-                },
+                layout: { visibility: isHidden ? 'none' : 'visible' },
                 paint: {
                   'line-color': color.stroke,
                   'line-width': 3,
@@ -399,14 +472,11 @@ export default function MapViewer({
                 }
               });
             } else {
-              // Polygons
               map.addLayer({
                 id: `${layerId}-polygon-fill`,
                 type: 'fill',
                 source: layerId,
-                layout: {
-                  visibility: isHidden ? 'none' : 'visible'
-                },
+                layout: { visibility: isHidden ? 'none' : 'visible' },
                 paint: {
                   'fill-color': color.fill,
                   'fill-opacity': alpha * 0.55
@@ -417,9 +487,7 @@ export default function MapViewer({
                 id: `${layerId}-polygon-stroke`,
                 type: 'line',
                 source: layerId,
-                layout: {
-                  visibility: isHidden ? 'none' : 'visible'
-                },
+                layout: { visibility: isHidden ? 'none' : 'visible' },
                 paint: {
                   'line-color': color.stroke,
                   'line-width': 2,
@@ -441,7 +509,7 @@ export default function MapViewer({
               }
             }
           } catch (err) {
-            console.error(`[MapViewer] Failed to load layer ${layerId}:`, err);
+            console.error(`Failed to load layer ${layerId}:`, err);
           }
         }
       }
@@ -450,7 +518,7 @@ export default function MapViewer({
     syncLayers();
   }, [layers, mapReady]);
 
-  // Synchronize dynamic visibility / mode changes
+  // Synchronize dynamic visibility / displayMode
   useEffect(() => {
     if (!mapReady || !mapRef.current) return;
     const map = mapRef.current;
@@ -505,6 +573,96 @@ export default function MapViewer({
     });
   }, [layers, hiddenLayers, opacities, displayModes, mapReady]);
 
+  // Handle Measurement Drawing Clicks
+  useEffect(() => {
+    if (!mapReady || !mapRef.current) return;
+    const map = mapRef.current;
+
+    measurePointsRef.current.modeActive = !!measureMode;
+
+    const onMapClick = (e) => {
+      if (!measureMode) return;
+      const pt = [e.lngLat.lng, e.lngLat.lat];
+      setMeasurePoints((prev) => [...prev, pt]);
+    };
+
+    map.on('click', onMapClick);
+    return () => {
+      map.off('click', onMapClick);
+    };
+  }, [measureMode, mapReady]);
+
+  // Update Measurement GeoJSON Features & Metrics
+  useEffect(() => {
+    if (!mapReady || !mapRef.current) return;
+    const map = mapRef.current;
+    const source = map.getSource('measure-geojson');
+    if (!source) return;
+
+    if (measurePoints.length === 0) {
+      source.setData({ type: 'FeatureCollection', features: [] });
+      setMeasureResult(null);
+      return;
+    }
+
+    const features = [];
+
+    measurePoints.forEach((coord) => {
+      features.push({
+        type: 'Feature',
+        geometry: { type: 'Point', coordinates: coord }
+      });
+    });
+
+    if (measureMode === 'distance' && measurePoints.length >= 2) {
+      features.push({
+        type: 'Feature',
+        geometry: { type: 'LineString', coordinates: measurePoints }
+      });
+
+      let totalKm = 0;
+      for (let i = 0; i < measurePoints.length - 1; i++) {
+        totalKm += haversineDistance(measurePoints[i], measurePoints[i + 1]);
+      }
+      setMeasureResult(
+        totalKm >= 1 ? `${totalKm.toFixed(2)} km` : `${(totalKm * 1000).toFixed(0)} m`
+      );
+    } else if (measureMode === 'area' && measurePoints.length >= 3) {
+      const ring = [...measurePoints, measurePoints[0]];
+      features.push({
+        type: 'Feature',
+        geometry: { type: 'Polygon', coordinates: [ring] }
+      });
+
+      const areaKm2 = calculatePolygonArea(measurePoints);
+      setMeasureResult(
+        areaKm2 >= 1
+          ? `${areaKm2.toFixed(2)} km²`
+          : `${(areaKm2 * 1000000).toLocaleString(undefined, { maximumFractionDigits: 0 })} m²`
+      );
+    } else {
+      setMeasureResult(null);
+    }
+
+    source.setData({ type: 'FeatureCollection', features });
+  }, [measurePoints, measureMode, mapReady]);
+
+  // Action: Start from Current Location
+  const handleStartFromCurrentLocation = () => {
+    const origin = userCoordRef.current;
+    setMeasureMode('distance');
+    setMeasurePoints([origin]);
+    if (mapRef.current) {
+      mapRef.current.flyTo({ center: origin, zoom: 13, duration: 800 });
+    }
+  };
+
+  const handleResetMeasure = () => {
+    setMeasureMode(null);
+    setMeasurePoints([]);
+    setMeasureResult(null);
+  };
+
   // Handle Zoom to Layer Request
   useEffect(() => {
     if (!zoomLayerId || !mapRef.current) return;
@@ -543,6 +701,72 @@ export default function MapViewer({
           border-top-color: #0f172a !important;
         }
       `}</style>
+
+      {/* Floating Measurement Toolbar */}
+      <div className="absolute top-4 left-4 z-20 flex items-center space-x-1.5 bg-slate-900/90 backdrop-blur-md border border-slate-800 rounded-lg p-1.5 shadow-xl text-xs">
+        <button
+          type="button"
+          onClick={() => {
+            setMeasureMode(measureMode === 'distance' ? null : 'distance');
+            setMeasurePoints([]);
+          }}
+          className={`flex items-center space-x-1.5 px-2.5 py-1.5 rounded transition ${
+            measureMode === 'distance'
+              ? 'bg-pink-600 text-white font-medium'
+              : 'text-slate-300 hover:bg-slate-800'
+          }`}
+          title="Measure distance along polyline"
+        >
+          <Ruler className="w-3.5 h-3.5" />
+          <span>Distance</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => {
+            setMeasureMode(measureMode === 'area' ? null : 'area');
+            setMeasurePoints([]);
+          }}
+          className={`flex items-center space-x-1.5 px-2.5 py-1.5 rounded transition ${
+            measureMode === 'area'
+              ? 'bg-pink-600 text-white font-medium'
+              : 'text-slate-300 hover:bg-slate-800'
+          }`}
+          title="Measure polygon surface area"
+        >
+          <Pentagon className="w-3.5 h-3.5" />
+          <span>Area</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={handleStartFromCurrentLocation}
+          className="flex items-center space-x-1.5 px-2.5 py-1.5 rounded text-sky-400 hover:bg-slate-800 transition"
+          title="Start distance measurement directly from your current position"
+        >
+          <MapPin className="w-3.5 h-3.5 text-sky-400" />
+          <span>From Here</span>
+        </button>
+
+        {measureMode && (
+          <button
+            type="button"
+            onClick={handleResetMeasure}
+            className="p-1.5 text-slate-400 hover:text-rose-400 hover:bg-slate-800 rounded transition"
+            title="Clear measurement"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        )}
+
+        {/* Live Calculation Output Badge */}
+        {measureResult && (
+          <div className="ml-2 pl-2 border-l border-slate-700 text-emerald-400 font-mono font-semibold px-2">
+            {measureResult}
+          </div>
+        )}
+      </div>
+
       <div
         ref={mapContainer}
         style={{ width: '100%', height: '100%', position: 'absolute', top: 0, left: 0 }}

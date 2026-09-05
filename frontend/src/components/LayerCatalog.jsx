@@ -1,5 +1,20 @@
 import React, { useState } from 'react';
-import { Layers, Eye, EyeOff, MapPin, Square, AlertCircle, Sliders, Focus, Download, ChevronDown, Flame, CircleDot, Grid } from 'lucide-react';
+import {
+  Layers,
+  Eye,
+  EyeOff,
+  MapPin,
+  Square,
+  AlertCircle,
+  Sliders,
+  Focus,
+  Download,
+  ChevronDown,
+  ChevronUp,
+  Flame,
+  CircleDot,
+  Grid
+} from 'lucide-react';
 
 export default function LayerCatalog({
   layers = [],
@@ -12,6 +27,7 @@ export default function LayerCatalog({
   onZoomToLayer,
   onExportLayer
 }) {
+  const [isCollapsed, setIsCollapsed] = useState(false);
   const [activeExportMenu, setActiveExportMenu] = useState(null);
 
   const isPointLayer = (geomType) => {
@@ -39,14 +55,41 @@ export default function LayerCatalog({
     setActiveExportMenu(null);
   };
 
+  // Minimized Floating Pill View
+  if (isCollapsed) {
+    return (
+      <div className="absolute top-4 right-14 z-20">
+        <button
+          type="button"
+          onClick={() => setIsCollapsed(false)}
+          className="flex items-center space-x-2 px-3 py-2 bg-slate-900/90 hover:bg-slate-850 backdrop-blur-md border border-slate-700/80 rounded-lg shadow-xl text-xs font-medium text-slate-200 hover:text-white transition group"
+          title="Expand Active Map Layers HUD"
+        >
+          <Layers className="w-4 h-4 text-indigo-400 group-hover:scale-110 transition-transform" />
+          <span>Layers ({layers.length})</span>
+          <ChevronDown className="w-3.5 h-3.5 text-slate-400" />
+        </button>
+      </div>
+    );
+  }
+
+  // Expanded Full Panel View
   return (
-    <div className="absolute top-4 right-14 w-80 max-h-[calc(100vh-2rem)] bg-slate-900/90 backdrop-blur-md border border-slate-800 rounded-lg shadow-xl flex flex-col z-20 overflow-visible">
-      {/* Header */}
+    <div className="absolute top-4 right-14 w-80 max-h-[calc(100vh-2rem)] bg-slate-900/90 backdrop-blur-md border border-slate-800 rounded-lg shadow-xl flex flex-col z-20 overflow-visible transition-all duration-200">
+      {/* Header with Collapse Button */}
       <div className="p-3 border-b border-slate-800 flex items-center justify-between text-xs font-semibold text-slate-300 tracking-wider uppercase">
         <div className="flex items-center space-x-2">
           <Layers className="w-4 h-4 text-indigo-400" />
           <span>Active Map Layers ({layers.length})</span>
         </div>
+        <button
+          type="button"
+          onClick={() => setIsCollapsed(true)}
+          className="p-1 rounded hover:bg-slate-800 text-slate-400 hover:text-slate-200 transition"
+          title="Collapse Panel"
+        >
+          <ChevronUp className="w-4 h-4" />
+        </button>
       </div>
 
       {/* Layer List */}
