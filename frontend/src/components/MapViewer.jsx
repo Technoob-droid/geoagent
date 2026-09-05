@@ -2,7 +2,12 @@ import React, { useEffect, useRef } from 'react';
 import maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 
-export default function MapViewer({ layers = [], hiddenLayers = new Set(), onViewportChange }) {
+export default function MapViewer({
+  layers = [],
+  hiddenLayers = new Set(),
+  opacities = {},
+  onViewportChange
+}) {
   const mapContainer = useRef(null);
   const mapRef = useRef(null);
   const loadedLayersRef = useRef(new Set());
@@ -97,6 +102,8 @@ export default function MapViewer({ layers = [], hiddenLayers = new Set(), onVie
               data: geojson
             });
 
+            const initialOpacity = opacities[layer.layer_id] ?? 0.75;
+
             // Point Styling
             map.addLayer({
               id: layerIdPoint,
@@ -107,7 +114,9 @@ export default function MapViewer({ layers = [], hiddenLayers = new Set(), onVie
                 'circle-radius': 7,
                 'circle-color': '#0284c7',
                 'circle-stroke-width': 2,
-                'circle-stroke-color': '#ffffff'
+                'circle-stroke-color': '#ffffff',
+                'circle-opacity': initialOpacity,
+                'circle-stroke-opacity': initialOpacity
               }
             });
 
@@ -119,7 +128,7 @@ export default function MapViewer({ layers = [], hiddenLayers = new Set(), onVie
               filter: ['==', '$type', 'Polygon'],
               paint: {
                 'fill-color': '#e11d48',
-                'fill-opacity': 0.35
+                'fill-opacity': initialOpacity * 0.5 // base fill is semi-transparent
               }
             });
 
@@ -130,7 +139,8 @@ export default function MapViewer({ layers = [], hiddenLayers = new Set(), onVie
               source: sourceId,
               paint: {
                 'line-color': '#be123c',
-                'line-width': 2
+                'line-width': 2,
+                'line-opacity': initialOpacity
               }
             });
           }
@@ -146,7 +156,7 @@ export default function MapViewer({ layers = [], hiddenLayers = new Set(), onVie
     } else {
       map.once('load', renderLayers);
     }
-  }, [layers]);
+  }, [layers, opacities]);
 
   // 3. Handle Dynamic Visibility Toggling
   useEffect(() => {
@@ -169,12 +179,35 @@ export default function MapViewer({ layers = [], hiddenLayers = new Set(), onVie
     });
   }, [hiddenLayers, layers]);
 
-  // 4. Feature Inspection Popups & Cursor Management
+  // 4. Handle Dynamic Opacity Changes
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !map.isStyleLoaded()) return;
+
+    layers.forEach((layer) => {
+      const opacity = opacities[layer.layer_id] ?? 0.75;
+      const pointLayer = `layer-${layer.layer_id}-point`;
+      const fillLayer = `layer-${layer.layer_id}-fill`;
+      const lineLayer = `layer-${layer.layer_id}-line`;
+
+      if (map.getLayer(pointLayer)) {
+        map.setPaintProperty(pointLayer, 'circle-opacity', opacity);
+        map.setPaintProperty(pointLayer, 'circle-stroke-opacity', opacity);
+      }
+      if (map.getLayer(fillLayer)) {
+        map.setPaintProperty(fillLayer, 'fill-opacity', opacity * 0.5);
+      }
+      if (map.getLayer(lineLayer)) {
+        map.setPaintProperty(lineLayer, 'line-opacity', opacity);
+      }
+    });
+  }, [opacities, layers]);
+
+  // 5. Feature Inspection Popups & Cursor Management
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
 
-    // Collect all interactive sub-layer IDs currently active and visible
     const interactiveLayerIds = [];
     layers.forEach((l) => {
       if (!hiddenLayers.has(l.layer_id)) {
@@ -184,7 +217,6 @@ export default function MapViewer({ layers = [], hiddenLayers = new Set(), onVie
     });
 
     const handleFeatureClick = (e) => {
-      // Find visible rendered layers that exist on the map canvas
       const availableLayers = interactiveLayerIds.filter((id) => map.getLayer(id));
       if (availableLayers.length === 0) return;
 
@@ -195,19 +227,23 @@ export default function MapViewer({ layers = [], hiddenLayers = new Set(), onVie
       const props = feature.properties || {};
       const coordinates = [e.lngLat.lng.toFixed(5), e.lngLat.lat.toFixed(5)];
 
-      // Pick a primary title (name, id, or feature type)
-      const title = props.name || props.hospital_name || props.title || feature.layer.id.replace('layer-', '').replace(/-fill|-point/, '');
+      const title =
+        props.name ||
+        props.hospital_name ||
+        props.title ||
+        feature.layer.id.replace('layer-', '').replace(/-fill|-point/, '');
 
-      // Build key-value property rows, excluding large geometry dumps or internals
       const propertyRows = Object.entries(props)
         .filter(([k]) => !['geom', 'geometry', 'id'].includes(k.toLowerCase()))
         .slice(0, 8)
-        .map(([k, v]) => `
+        .map(
+          ([k, v]) => `
           <div style="display:flex; justify-content:space-between; gap:12px; font-size:11px; margin-bottom:3px;">
             <span style="color:#94a3b8; text-transform:capitalize;">${k.replace(/_/g, ' ')}</span>
             <span style="color:#f8fafc; font-weight:500; max-width:140px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${v}</span>
           </div>
-        `)
+        `
+        )
         .join('');
 
       const popupHtml = `
@@ -233,10 +269,7 @@ export default function MapViewer({ layers = [], hiddenLayers = new Set(), onVie
         });
       }
 
-      popupRef.current
-        .setLngLat(e.lngLat)
-        .setHTML(popupHtml)
-        .addTo(map);
+      popupRef.current.setLngLat(e.lngLat).setHTML(popupHtml).addTo(map);
     };
 
     const handleMouseEnter = () => {
@@ -249,7 +282,6 @@ export default function MapViewer({ layers = [], hiddenLayers = new Set(), onVie
 
     map.on('click', handleFeatureClick);
 
-    // Attach hover effects across interactive layers
     interactiveLayerIds.forEach((id) => {
       if (map.getLayer(id)) {
         map.on('mouseenter', id, handleMouseEnter);

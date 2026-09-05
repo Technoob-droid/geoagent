@@ -6,6 +6,7 @@ import LayerCatalog from './components/LayerCatalog';
 export default function App() {
   const [layers, setLayers] = useState([]);
   const [hiddenLayers, setHiddenLayers] = useState(new Set());
+  const [opacities, setOpacities] = useState({});
   const [viewportBbox, setViewportBbox] = useState(null);
 
   useEffect(() => {
@@ -14,6 +15,11 @@ export default function App() {
       .then((data) => {
         if (Array.isArray(data)) {
           setLayers(data);
+          const initialOpacities = {};
+          data.forEach((l) => {
+            initialOpacities[l.layer_id] = 0.75;
+          });
+          setOpacities(initialOpacities);
         }
       })
       .catch((err) => console.error('Failed to fetch layers:', err));
@@ -25,6 +31,10 @@ export default function App() {
       if (exists) return prev;
       return [...prev, newLayer];
     });
+    setOpacities((prev) => ({
+      ...prev,
+      [newLayer.layer_id]: 0.75
+    }));
   };
 
   const handleDeleteLayer = (layerId) => {
@@ -32,6 +42,11 @@ export default function App() {
     setHiddenLayers((prev) => {
       const next = new Set(prev);
       next.delete(layerId);
+      return next;
+    });
+    setOpacities((prev) => {
+      const next = { ...prev };
+      delete next[layerId];
       return next;
     });
   };
@@ -46,6 +61,13 @@ export default function App() {
       }
       return next;
     });
+  };
+
+  const handleOpacityChange = (layerId, value) => {
+    setOpacities((prev) => ({
+      ...prev,
+      [layerId]: parseFloat(value)
+    }));
   };
 
   return (
@@ -64,12 +86,15 @@ export default function App() {
         <MapViewer 
           layers={layers} 
           hiddenLayers={hiddenLayers} 
+          opacities={opacities}
           onViewportChange={setViewportBbox} 
         />
         <LayerCatalog 
           layers={layers} 
           hiddenLayers={hiddenLayers} 
+          opacities={opacities}
           onToggleVisibility={handleToggleVisibility} 
+          onOpacityChange={handleOpacityChange}
         />
       </div>
     </div>
