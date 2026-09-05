@@ -6,12 +6,14 @@ export default function MapViewer({
   layers = [],
   hiddenLayers = new Set(),
   opacities = {},
+  zoomLayerId = null,
   onViewportChange
 }) {
   const mapContainer = useRef(null);
   const mapRef = useRef(null);
   const loadedLayersRef = useRef(new Set());
   const popupRef = useRef(null);
+  const layerDataCache = useRef(new Map());
 
   // 1. Initialize MapLibre Canvas
   useEffect(() => {
@@ -71,6 +73,7 @@ export default function MapViewer({
           if (map.getSource(sourceId)) map.removeSource(sourceId);
 
           loadedLayersRef.current.delete(layerId);
+          layerDataCache.current.delete(layerId);
         }
       }
     }
@@ -95,6 +98,7 @@ export default function MapViewer({
             continue;
           }
           const geojson = await res.json();
+          layerDataCache.current.set(layer.layer_id, geojson);
 
           if (!map.getSource(sourceId)) {
             map.addSource(sourceId, {
@@ -128,7 +132,7 @@ export default function MapViewer({
               filter: ['==', '$type', 'Polygon'],
               paint: {
                 'fill-color': '#e11d48',
-                'fill-opacity': initialOpacity * 0.5 // base fill is semi-transparent
+                'fill-opacity': initialOpacity * 0.5
               }
             });
 
@@ -158,7 +162,59 @@ export default function MapViewer({
     }
   }, [layers, opacities]);
 
-  // 3. Handle Dynamic Visibility Toggling
+  // 3. Fit Bounds on Requested Layer
+  useEffect(() => {
+    if (!zoomLayerId || !mapRef.current) return;
+    const map = mapRef.current;
+    const geojson = layerDataCache.current.get(zoomLayerId);
+
+    if (!geojson || !geojson.features || geojson.features.length === 0) return;
+
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+
+    const traverseCoords = (coords) => {
+      if (typeof coords[0] === 'number') {
+        const [lon, lat] = coords;
+        if (lon < minX) minX = lon;
+        if (lat < minY) minY = lat;
+        if (lon > maxX) maxX = lon;
+        if (lat > maxY) maxY = lat;
+      } else {
+        coords.forEach(traverseCoords);
+      }
+    };
+
+    geojson.features.forEach((f) => {
+      if (f.geometry && f.geometry.coordinates) {
+        traverseCoords(f.geometry.coordinates);
+      }
+    });
+
+    if (minX !== Infinity && minY !== Infinity) {
+      // For single points, zoom to center instead of collapsing bounds
+      if (minX === maxX && minY === maxY) {
+        map.flyTo({
+          center: [minX, minY],
+          zoom: 14,
+          duration: 1000
+        });
+      } else {
+        map.fitBounds(
+          [
+            [minX, minY],
+            [maxX, maxY]
+          ],
+          {
+            padding: 80,
+            maxZoom: 15,
+            duration: 1200
+          }
+        );
+      }
+    }
+  }, [zoomLayerId]);
+
+  // 4. Handle Dynamic Visibility Toggling
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !map.isStyleLoaded()) return;
@@ -179,7 +235,7 @@ export default function MapViewer({
     });
   }, [hiddenLayers, layers]);
 
-  // 4. Handle Dynamic Opacity Changes
+  // 5. Handle Dynamic Opacity Changes
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !map.isStyleLoaded()) return;
@@ -203,7 +259,7 @@ export default function MapViewer({
     });
   }, [opacities, layers]);
 
-  // 5. Feature Inspection Popups & Cursor Management
+  // 6. Feature Inspection Popups & Cursor Management
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;

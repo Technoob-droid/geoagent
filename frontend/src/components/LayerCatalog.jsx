@@ -1,12 +1,13 @@
 import React from 'react';
-import { Layers, Eye, EyeOff, MapPin, Square, AlertCircle, Sliders } from 'lucide-react';
+import { Layers, Eye, EyeOff, MapPin, Square, AlertCircle, Sliders, Focus } from 'lucide-react';
 
 export default function LayerCatalog({
   layers = [],
   hiddenLayers = new Set(),
   opacities = {},
   onToggleVisibility,
-  onOpacityChange
+  onOpacityChange,
+  onZoomToLayer
 }) {
   const getGeomIcon = (geomType) => {
     switch (geomType?.toUpperCase()) {
@@ -51,7 +52,7 @@ export default function LayerCatalog({
                     : 'bg-slate-950/80 border-slate-800/80 hover:border-slate-700'
                 }`}
               >
-                {/* Top row: Icon, title, feature info, visibility button */}
+                {/* Top row: Icon, title, feature info, actions */}
                 <div className="flex items-center justify-between">
                   <div className="flex items-start space-x-2.5 overflow-hidden">
                     <div className="mt-0.5 shrink-0">
@@ -67,22 +68,33 @@ export default function LayerCatalog({
                     </div>
                   </div>
 
-                  <button
-                    type="button"
-                    onClick={() => onToggleVisibility && onToggleVisibility(layer.layer_id)}
-                    className={`p-1.5 rounded transition ml-2 shrink-0 ${
-                      isHidden
-                        ? 'text-slate-500 hover:text-slate-300 hover:bg-slate-800'
-                        : 'text-emerald-400 hover:text-emerald-300 hover:bg-slate-800'
-                    }`}
-                    title={isHidden ? 'Show layer' : 'Hide layer'}
-                  >
-                    {isHidden ? (
-                      <EyeOff className="w-3.5 h-3.5" />
-                    ) : (
-                      <Eye className="w-3.5 h-3.5" />
-                    )}
-                  </button>
+                  {/* Actions: Zoom to layer & Visibility toggle */}
+                  <div className="flex items-center space-x-1 ml-2 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => onZoomToLayer && onZoomToLayer(layer.layer_id)}
+                      className="p-1.5 rounded transition text-slate-400 hover:text-sky-300 hover:bg-slate-800"
+                      title="Fit map to layer bounds"
+                    >
+                      <Focus className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onToggleVisibility && onToggleVisibility(layer.layer_id)}
+                      className={`p-1.5 rounded transition ${
+                        isHidden
+                          ? 'text-slate-500 hover:text-slate-300 hover:bg-slate-800'
+                          : 'text-emerald-400 hover:text-emerald-300 hover:bg-slate-800'
+                      }`}
+                      title={isHidden ? 'Show layer' : 'Hide layer'}
+                    >
+                      {isHidden ? (
+                        <EyeOff className="w-3.5 h-3.5" />
+                      ) : (
+                        <Eye className="w-3.5 h-3.5" />
+                      )}
+                    </button>
+                  </div>
                 </div>
 
                 {/* Bottom row: Opacity Slider */}

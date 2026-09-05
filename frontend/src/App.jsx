@@ -7,6 +7,7 @@ export default function App() {
   const [layers, setLayers] = useState([]);
   const [hiddenLayers, setHiddenLayers] = useState(new Set());
   const [opacities, setOpacities] = useState({});
+  const [zoomLayerId, setZoomLayerId] = useState(null);
   const [viewportBbox, setViewportBbox] = useState(null);
 
   useEffect(() => {
@@ -70,6 +71,14 @@ export default function App() {
     }));
   };
 
+  const handleZoomToLayer = (layerId) => {
+    // Reset momentarily so clicking the same layer multiple times triggers the effect
+    setZoomLayerId(null);
+    setTimeout(() => {
+      setZoomLayerId(layerId);
+    }, 10);
+  };
+
   return (
     <div style={{ display: 'flex', width: '100vw', height: '100vh', overflow: 'hidden', backgroundColor: '#020617' }}>
       {/* Left Chat & Execution Console */}
@@ -87,6 +96,7 @@ export default function App() {
           layers={layers} 
           hiddenLayers={hiddenLayers} 
           opacities={opacities}
+          zoomLayerId={zoomLayerId}
           onViewportChange={setViewportBbox} 
         />
         <LayerCatalog 
@@ -95,6 +105,7 @@ export default function App() {
           opacities={opacities}
           onToggleVisibility={handleToggleVisibility} 
           onOpacityChange={handleOpacityChange}
+          onZoomToLayer={handleZoomToLayer}
         />
       </div>
     </div>
