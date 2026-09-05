@@ -29,17 +29,26 @@ logger.info(f"Initialized ChatGroq with key prefix: {groq_key[:7] if groq_key el
 
 # Bind spatial tools to Groq model
 llm = ChatGroq(
-    model="openai/gpt-oss-120b",
+    model="openai/gpt-oss-20b",
     temperature=0,
     groq_api_key=groq_key,
 ).bind_tools(ALL_SPATIAL_TOOLS)
 
 
 async def agent_node(state: AgentState) -> dict:
-    """Evaluates conversation and invokes spatial tools or prepares natural language answer asynchronously."""
+    """Evaluates conversation and invokes spatial tools with a tight 4-message window."""
     sys_prompt = get_system_prompt()
-    messages = [SystemMessage(content=sys_prompt)] + list(state["messages"])
-    
+
+    # Limit message history to the last 4 messages to stay safely below the 8,000 TPM limit
+    raw_messages = list(state["messages"])
+    recent_messages = raw_messages[-4:] if len(raw_messages) > 4 else raw_messages
+
+    # Trim leading orphaned ToolMessages if history was sliced mid-tool-call
+    while recent_messages and isinstance(recent_messages[0], ToolMessage):
+        recent_messages = recent_messages[1:]
+
+    messages = [SystemMessage(content=sys_prompt)] + recent_messages
+
     response = await llm.ainvoke(messages)
     return {"messages": [response]}
 
@@ -66,9 +75,10 @@ def post_tool_evaluator(state: AgentState) -> dict:
                         if del_id not in deleted_layers:
                             deleted_layers.append(del_id)
                         new_layers = [l for l in new_layers if l.get("layer_id") != del_id]
-                    # Error detection
+                    # Error detection and logging
                     elif payload.get("status") == "error":
                         error_count += 1
+                        logger.error(f"Tool execution returned error: {payload.get('message')}")
             except Exception:
                 pass
         else:

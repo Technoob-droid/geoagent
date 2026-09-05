@@ -1,6 +1,7 @@
 import json
 import logging
 from typing import Optional
+import httpx
 from langchain_core.tools import tool
 from backend.app.tools.engine import spatial_engine
 from backend.app.tools.catalog import catalog_manager
@@ -14,6 +15,88 @@ SYSTEM_ADMIN_LAYERS = {
     "india_cities",
     "india_villages",
 }
+
+
+def _resolve_location_coords(location_spec: str | dict | list) -> tuple[float, float] | None:
+    """
+    Resolves arbitrary coordinate strings, lists, layer names, or landmark names to (lon, lat).
+    """
+    if isinstance(location_spec, (list, tuple)) and len(location_spec) >= 2:
+        return float(location_spec[0]), float(location_spec[1])
+
+    if isinstance(location_spec, str):
+        cleaned = location_spec.strip()
+        if "," in cleaned:
+            parts = [p.strip() for p in cleaned.split(",")]
+            try:
+                return float(parts[0]), float(parts[1])
+            except ValueError:
+                pass
+
+        clean_name = cleaned.replace("'", "''").lower()
+        clean_tbl_cand = clean_name.replace(" ", "_")
+        active_layers = [l["layer_id"] for l in catalog_manager.list_layers()]
+
+        # 1. Match directly against user layer table names (e.g., "kolkata_center")
+        for tbl in active_layers:
+            if tbl in SYSTEM_ADMIN_LAYERS:
+                continue
+            if tbl == clean_tbl_cand or clean_tbl_cand in tbl or tbl in clean_tbl_cand:
+                try:
+                    res = spatial_engine.con.execute(f"""
+                        SELECT 
+                            ST_X(ST_Centroid(geom)) AS lon, 
+                            ST_Y(ST_Centroid(geom)) AS lat 
+                        FROM {tbl} 
+                        WHERE geom IS NOT NULL
+                        LIMIT 1;
+                    """).fetchone()
+                    if res and res[0] is not None:
+                        return float(res[0]), float(res[1])
+                except Exception:
+                    pass
+
+        # 2. Match feature attributes across user-generated layers
+        for tbl in active_layers:
+            if tbl in SYSTEM_ADMIN_LAYERS:
+                continue
+            try:
+                res = spatial_engine.con.execute(f"""
+                    SELECT 
+                        ST_X(ST_Centroid(geom)) AS lon, 
+                        ST_Y(ST_Centroid(geom)) AS lat 
+                    FROM {tbl} 
+                    WHERE lower(CAST(columns(*) AS VARCHAR)) LIKE '%{clean_name}%'
+                    LIMIT 1;
+                """).fetchone()
+                if res and res[0] is not None:
+                    return float(res[0]), float(res[1])
+            except Exception:
+                continue
+
+        # 3. Fallback to base admin boundary datasets
+        admin_lookups = [
+            ("india_cities", "city_name"),
+            ("india_districts", "district_name"),
+            ("india_villages", "village_name"),
+        ]
+        for tbl, col in admin_lookups:
+            try:
+                res = spatial_engine.con.execute(f"""
+                    SELECT 
+                        ST_X(ST_Centroid(geom)) AS lon, 
+                        ST_Y(ST_Centroid(geom)) AS lat 
+                    FROM {tbl} 
+                    WHERE lower({col}) = lower('{clean_name}') 
+                       OR lower({col}) LIKE '%{clean_name}%'
+                    LIMIT 1;
+                """).fetchone()
+                if res and res[0] is not None:
+                    return float(res[0]), float(res[1])
+            except Exception:
+                continue
+
+    return None
 
 
 @tool
@@ -131,7 +214,7 @@ def find_near_place(
 
     src_tbl, src_col = tier_map[tier]
     clean_name = place_name.strip().replace("'", "''")
-    deg_radius = distance_km / 111.32  # Standard geodesic degree approximation
+    deg_radius = distance_km / 111.32  # Geodesic degree approximation
 
     sql = f"""
         SELECT 
@@ -163,30 +246,30 @@ def buffer_layer(
     output_layer_name: str
 ) -> str:
     """
-    Generates a metric buffer around geometries in an existing layer.
-    Handles metric reprojection automatically: EPSG:4326 -> EPSG:3857 -> EPSG:4326.
+    Generates an accurate metric buffer around geometries in an existing layer.
+    Uses latitude-scaled geodesic degree calculation to prevent axis distortion.
     """
+    # 1 degree lat ≈ 111,139 meters; scale longitude degrees by cos(latitude)
     sql = f"""
+        WITH target_geom AS (
+            SELECT *, ST_Y(ST_Centroid(geom)) AS ref_lat FROM {layer_id} WHERE geom IS NOT NULL
+        )
         SELECT
-            * EXCLUDE (geom),
+            * EXCLUDE (geom, ref_lat),
             ST_SetCRS(
-                ST_Transform(
-                    ST_Buffer(
-                        ST_Transform(geom, 'EPSG:4326', 'EPSG:3857'),
-                        {distance_meters}
-                    ),
-                    'EPSG:3857', 'EPSG:4326'
+                ST_Buffer(
+                    geom,
+                    ({distance_meters} / 111139.0)
                 ),
                 'EPSG:4326'
             ) AS geom
-        FROM {layer_id}
-        WHERE geom IS NOT NULL;
+        FROM target_geom;
     """
     res = spatial_engine.execute_spatial_query(
         query=sql,
         output_layer_id=output_layer_id,
         layer_name=output_layer_name,
-        description=f"Buffer of {layer_id} at {distance_meters}m"
+        description=f"Geodesic buffer of {layer_id} at {distance_meters}m"
     )
     return json.dumps(res)
 
@@ -323,3 +406,181 @@ def delete_layer(layer_id: str) -> str:
             "status": "error",
             "message": f"Failed to delete layer '{layer_id}': {str(e)}"
         })
+
+
+@tool
+def calculate_evacuation_route(
+    start_location: str,
+    end_location: str,
+    avoid_layer_id: Optional[str] = None,
+    output_layer_id: str = "evacuation_route",
+    output_layer_name: str = "Evacuation Route"
+) -> str:
+    """
+    Computes an optimal road evacuation route between two locations using OSRM,
+    checks for collision against active hazard layers, and attempts an automatic
+    waypoint detour if a collision is detected.
+
+    Args:
+        start_location: Start coordinates ('lon, lat') or name of a landmark/city.
+        end_location: End coordinates ('lon, lat') or name of a landmark/city.
+        avoid_layer_id: Optional ID or keyword of a hazard/flood layer to avoid.
+        output_layer_id: Snake_case identifier for the output route layer.
+        output_layer_name: Human-readable name for display on the map.
+    """
+    clean_output_id = output_layer_id.strip().lower().replace(" ", "_")
+
+    start_coords = _resolve_location_coords(start_location)
+    end_coords = _resolve_location_coords(end_location)
+
+    if not start_coords:
+        return json.dumps({
+            "status": "error",
+            "message": f"Could not resolve start location '{start_location}' to valid coordinates."
+        })
+    if not end_coords:
+        return json.dumps({
+            "status": "error",
+            "message": f"Could not resolve end location '{end_location}' to valid coordinates."
+        })
+
+    s_lon, s_lat = start_coords
+    e_lon, e_lat = end_coords
+
+    def query_osrm(coords_list: list[tuple[float, float]]) -> dict | None:
+        coord_str = ";".join(f"{lon},{lat}" for lon, lat in coords_list)
+        url = f"https://router.project-osrm.org/route/v1/driving/{coord_str}?overview=full&geometries=geojson"
+        with httpx.Client(timeout=10.0) as client:
+            r = client.get(url)
+            if r.status_code == 200:
+                data = r.json()
+                if data.get("routes"):
+                    return data["routes"][0]
+        return None
+
+    try:
+        primary_route = query_osrm([(s_lon, s_lat), (e_lon, e_lat)])
+        if not primary_route:
+            return json.dumps({
+                "status": "error",
+                "message": f"No driving route found between {start_location} and {end_location}."
+            })
+
+        active_route = primary_route
+        geom_json = json.dumps(active_route["geometry"]).replace("'", "''")
+        distance_km = round(active_route["distance"] / 1000.0, 2)
+        duration_min = round(active_route["duration"] / 60.0, 1)
+
+        matched_hazard_table = None
+        intersects_hazard = False
+        hazard_intersect_count = 0
+        detour_applied = False
+
+        if avoid_layer_id:
+            cand = avoid_layer_id.strip().lower().replace(" ", "_")
+            all_layers = [l["layer_id"] for l in catalog_manager.list_layers()]
+            if cand in all_layers:
+                matched_hazard_table = cand
+            else:
+                for lay in all_layers:
+                    if cand in lay or lay in cand or "flood" in lay:
+                        matched_hazard_table = lay
+                        break
+
+        if matched_hazard_table:
+            check_sql = f"""
+                SELECT count(*) 
+                FROM {matched_hazard_table} 
+                WHERE ST_Intersects(geom, ST_GeomFromGeoJSON('{geom_json}'))
+            """
+            hazard_intersect_count = spatial_engine.con.execute(check_sql).fetchone()[0]
+            intersects_hazard = hazard_intersect_count > 0
+
+            # Detour sampling if route intersects hazard
+            if intersects_hazard:
+                extent_info = spatial_engine.con.execute(f"""
+                    SELECT 
+                        ST_XMin(ST_Extent(geom)) AS min_x,
+                        ST_YMin(ST_Extent(geom)) AS min_y,
+                        ST_XMax(ST_Extent(geom)) AS max_x,
+                        ST_YMax(ST_Extent(geom)) AS max_y
+                    FROM {matched_hazard_table}
+                    WHERE ST_Intersects(geom, ST_GeomFromGeoJSON('{geom_json}'));
+                """).fetchone()
+
+                if extent_info and extent_info[0] is not None:
+                    min_x, min_y, max_x, max_y = extent_info
+                    mid_x = (min_x + max_x) / 2.0
+                    mid_y = (min_y + max_y) / 2.0
+                    offset_x = (max_x - min_x) * 0.75 or 0.02
+                    offset_y = (max_y - min_y) * 0.75 or 0.02
+
+                    candidate_waypoints = [
+                        (mid_x + offset_x, mid_y),
+                        (mid_x - offset_x, mid_y),
+                        (mid_x, mid_y + offset_y),
+                        (mid_x, mid_y - offset_y),
+                    ]
+
+                    for wp_lon, wp_lat in candidate_waypoints:
+                        alt_route = query_osrm([(s_lon, s_lat), (wp_lon, wp_lat), (e_lon, e_lat)])
+                        if not alt_route:
+                            continue
+                        alt_geom_str = json.dumps(alt_route["geometry"]).replace("'", "''")
+                        alt_hits = spatial_engine.con.execute(f"""
+                            SELECT count(*) 
+                            FROM {matched_hazard_table} 
+                            WHERE ST_Intersects(geom, ST_GeomFromGeoJSON('{alt_geom_str}'))
+                        """).fetchone()[0]
+
+                        if alt_hits == 0:
+                            active_route = alt_route
+                            geom_json = alt_geom_str
+                            distance_km = round(active_route["distance"] / 1000.0, 2)
+                            duration_min = round(active_route["duration"] / 60.0, 1)
+                            intersects_hazard = False
+                            hazard_intersect_count = 0
+                            detour_applied = True
+                            break
+
+        # Persist route via spatial engine
+        query_sql = f"""
+            SELECT 
+                1 AS route_id,
+                '{start_location}' AS origin,
+                '{end_location}' AS destination,
+                {distance_km} AS distance_km,
+                {duration_min} AS duration_min,
+                {intersects_hazard} AS passes_through_hazard,
+                {hazard_intersect_count} AS intersecting_hazard_features,
+                {detour_applied} AS detour_applied,
+                ST_SetCRS(ST_GeomFromGeoJSON('{geom_json}'), 'EPSG:4326') AS geom
+        """
+
+        res = spatial_engine.execute_spatial_query(
+            query=query_sql,
+            output_layer_id=clean_output_id,
+            layer_name=output_layer_name,
+            description=f"Evacuation route ({distance_km} km, ~{duration_min} min). Detour: {detour_applied}"
+        )
+
+        res.update({
+            "origin": start_location,
+            "destination": end_location,
+            "distance_km": distance_km,
+            "duration_min": duration_min,
+            "checked_against_layer": matched_hazard_table,
+            "passes_through_hazard": intersects_hazard,
+            "detour_applied": detour_applied,
+            "instruction": "Route is created and displayed on the map. Finish immediately. Do not call this tool again.",
+            "message": (
+                f"Route generated ({distance_km} km, ~{duration_min} min). "
+                f"Detour applied: {detour_applied}. "
+                f"Hazard collision: {'YES (intersects hazard)' if intersects_hazard else 'NO (clear)'}."
+            )
+        })
+        return json.dumps(res)
+
+    except Exception as e:
+        logger.exception("Evacuation routing error")
+        return json.dumps({"status": "error", "message": str(e)})

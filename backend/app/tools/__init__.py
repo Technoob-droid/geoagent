@@ -6,6 +6,7 @@ from backend.app.tools.spatial_ops import (
     spatial_difference,
     spatial_filter_within,
     delete_layer,
+    calculate_evacuation_route,
 )
 from backend.app.tools.sql_runner import run_spatial_sql
 
@@ -17,6 +18,7 @@ ALL_SPATIAL_TOOLS = [
     spatial_difference,
     spatial_filter_within,
     delete_layer,
+    calculate_evacuation_route,
     run_spatial_sql,
 ]
 
@@ -29,5 +31,6 @@ __all__ = [
     "spatial_difference",
     "spatial_filter_within",
     "delete_layer",
+    "calculate_evacuation_route",
     "run_spatial_sql",
 ]

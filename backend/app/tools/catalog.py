@@ -94,12 +94,10 @@ class CatalogManager:
         """
         Retrieves schema, feature counts, and column metadata for a specific layer.
         """
-        # Check system boundary layers first
         for admin_layer in ADMIN_BOUNDARIES_CATALOG:
             if admin_layer["layer_id"] == layer_id:
                 return admin_layer
 
-        # Check user analytical tables
         try:
             row = self.engine.con.execute(f"""
                 SELECT layer_id, name, description, geom_type, feature_count, bbox_json, columns_json, created_at 
@@ -126,21 +124,33 @@ class CatalogManager:
 
     def get_catalog_summary_for_llm(self) -> str:
         """
-        Formats catalog layer descriptions, columns, and spatial types
-        into a clean context prompt for the LLM agent.
+        Formats a compact catalog summary containing only active analytical layers
+        (capped to the most recent 5) to keep token payloads strictly under 8,000 TPM limits.
         """
         all_layers = self.list_layers()
+        if not all_layers:
+            return "No analytical layers active."
+
+        analytical_layers = [
+            l for l in all_layers 
+            if not l.get("is_system", False) and not l["layer_id"].startswith("india_")
+        ]
+
+        if not analytical_layers:
+            return "No custom analytical layers created yet."
+
+        recent_layers = analytical_layers[:5]
         summary_lines = []
-        for l in all_layers:
-            cols = ", ".join(l.get("columns", []))
+        for l in recent_layers:
+            desc = (l.get("description") or "User layer")[:50]
             summary_lines.append(
-                f"- Layer '{l['layer_id']}' ({l.get('geom_type', 'GEOMETRY')}, ~{l.get('feature_count', 0)} rows): "
-                f"{l.get('description', '')}. Columns: [{cols}]"
+                f"- '{l['layer_id']}' ({l.get('geom_type', 'GEOMETRY')}, {l.get('feature_count', 0)} rows): {desc}"
             )
         return "\n".join(summary_lines)
 
-    # Backward-compatible alias for prompt templates
-    get_catalog_summary_prompt = get_catalog_summary_for_llm
+    def get_catalog_summary_prompt(self) -> str:
+        """Alias for prompt templates."""
+        return self.get_catalog_summary_for_llm()
 
 
 catalog_manager = CatalogManager()
