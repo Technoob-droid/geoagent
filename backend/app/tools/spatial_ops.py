@@ -3,6 +3,7 @@ from langchain_core.tools import tool
 from backend.app.tools.engine import spatial_engine
 from backend.app.tools.catalog import catalog_manager
 
+
 @tool
 def list_available_layers() -> str:
     """
@@ -10,6 +11,7 @@ def list_available_layers() -> str:
     """
     layers = catalog_manager.list_layers()
     return json.dumps(layers, indent=2)
+
 
 @tool
 def get_layer_schema(layer_id: str) -> str:
@@ -21,7 +23,9 @@ def get_layer_schema(layer_id: str) -> str:
         return f"Error: Layer '{layer_id}' does not exist."
     return json.dumps(details, indent=2)
 
+
 get_layer_info = get_layer_schema
+
 
 @tool
 def buffer_layer(
@@ -55,6 +59,7 @@ def buffer_layer(
     )
     return json.dumps(res)
 
+
 @tool
 def spatial_intersection(
     source_layer_id: str,
@@ -69,7 +74,7 @@ def spatial_intersection(
     sql = f"""
         SELECT
             a.* EXCLUDE (geom),
-            b.* EXCLUDE (geom),
+            b.* EXCLUDE (geom, id),
             ST_Intersection(a.geom, b.geom) as geom
         FROM {source_layer_id} a
         JOIN {intersecting_layer_id} b ON ST_Intersects(a.geom, b.geom)
@@ -82,6 +87,40 @@ def spatial_intersection(
         description=f"Intersection of {source_layer_id} and {intersecting_layer_id}"
     )
     return json.dumps(res)
+
+
+@tool
+def spatial_difference(
+    source_layer_id: str,
+    subtract_layer_id: str,
+    output_layer_id: str,
+    output_layer_name: str
+) -> str:
+    """
+    Computes the geometric difference (ST_Difference) of source_layer_id minus subtract_layer_id.
+    Retains the areas of source_layer_id that do not fall within subtract_layer_id.
+    """
+    sql = f"""
+        WITH dissolved_sub AS (
+            SELECT ST_Union_Agg(geom) AS geom 
+            FROM {subtract_layer_id}
+            WHERE geom IS NOT NULL
+        )
+        SELECT 
+            a.* EXCLUDE (geom),
+            ST_Difference(a.geom, s.geom) AS geom
+        FROM {source_layer_id} a, dissolved_sub s
+        WHERE a.geom IS NOT NULL 
+          AND NOT ST_IsEmpty(ST_Difference(a.geom, s.geom));
+    """
+    res = spatial_engine.execute_spatial_query(
+        query=sql,
+        output_layer_id=output_layer_id,
+        layer_name=output_layer_name,
+        description=f"Difference of {source_layer_id} minus {subtract_layer_id}"
+    )
+    return json.dumps(res)
+
 
 @tool
 def delete_layer(layer_id: str) -> str:
@@ -100,6 +139,7 @@ def delete_layer(layer_id: str) -> str:
         "status": "error",
         "message": f"Failed to delete layer '{layer_id}'."
     })
+
 
 @tool
 def spatial_filter_within(
@@ -123,5 +163,4 @@ def spatial_filter_within(
         layer_name=output_layer_name,
         description=f"Features in {target_layer_id} within {boundary_layer_id}"
     )
-    
     return json.dumps(res)

@@ -3,8 +3,9 @@ from backend.app.tools.spatial_ops import (
     get_layer_schema,
     buffer_layer,
     spatial_intersection,
+    spatial_difference,
     spatial_filter_within,
-    delete_layer
+    delete_layer,
 )
 from backend.app.tools.sql_runner import run_spatial_sql
 
@@ -13,9 +14,10 @@ ALL_SPATIAL_TOOLS = [
     get_layer_schema,
     buffer_layer,
     spatial_intersection,
+    spatial_difference,
     spatial_filter_within,
     delete_layer,
-    run_spatial_sql
+    run_spatial_sql,
 ]
 
 __all__ = [
@@ -24,7 +26,8 @@ __all__ = [
     "get_layer_schema",
     "buffer_layer",
     "spatial_intersection",
+    "spatial_difference",
     "spatial_filter_within",
     "delete_layer",
-    "run_spatial_sql"
+    "run_spatial_sql",
 ]

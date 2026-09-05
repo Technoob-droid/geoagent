@@ -23,7 +23,6 @@ logger = logging.getLogger("geoagent.graph")
 
 groq_key = os.getenv("GROQ_API_KEY")
 if not groq_key:
-    # Check settings fallback if defined in pydantic
     groq_key = getattr(settings, "GROQ_API_KEY", None)
 
 logger.info(f"Initialized ChatGroq with key prefix: {groq_key[:7] if groq_key else 'MISSING'}")
@@ -44,9 +43,10 @@ def agent_node(state: AgentState) -> dict:
     return {"messages": [response]}
 
 def post_tool_evaluator(state: AgentState) -> dict:
-    """Inspects tool messages to record generated layers and detect runtime errors."""
+    """Inspects tool messages to record generated/deleted layers and detect runtime errors."""
     messages = state["messages"]
     new_layers = list(state.get("new_layers") or [])
+    deleted_layers = list(state.get("deleted_layers") or [])
     error_count = state.get("error_count", 0)
 
     for msg in reversed(messages):
@@ -54,9 +54,17 @@ def post_tool_evaluator(state: AgentState) -> dict:
             try:
                 payload = json.loads(msg.content)
                 if isinstance(payload, dict):
+                    # Layer creation success
                     if payload.get("status") == "success" and "layer_id" in payload:
                         if not any(l["layer_id"] == payload["layer_id"] for l in new_layers):
                             new_layers.append(payload)
+                    # Layer deletion success
+                    elif payload.get("status") == "success" and "deleted_layer_id" in payload:
+                        del_id = payload["deleted_layer_id"]
+                        if del_id not in deleted_layers:
+                            deleted_layers.append(del_id)
+                        new_layers = [l for l in new_layers if l.get("layer_id") != del_id]
+                    # Error detection
                     elif payload.get("status") == "error":
                         error_count += 1
             except Exception:
@@ -64,7 +72,11 @@ def post_tool_evaluator(state: AgentState) -> dict:
         else:
             break
 
-    return {"new_layers": new_layers, "error_count": error_count}
+    return {
+        "new_layers": new_layers,
+        "deleted_layers": deleted_layers,
+        "error_count": error_count,
+    }
 
 def route_after_agent(state: AgentState) -> Literal["tools", "__end__"]:
     """Determines whether the agent needs tool execution or can answer directly."""
@@ -91,13 +103,13 @@ builder.set_entry_point("agent")
 
 builder.add_conditional_edges("agent", route_after_agent, {
     "tools": "tools",
-    END: END
+    END: END,
 })
 
 builder.add_edge("tools", "evaluator")
 builder.add_conditional_edges("evaluator", route_after_tools, {
     "agent": "agent",
-    END: END
+    END: END,
 })
 
 agent_graph = builder.compile()
