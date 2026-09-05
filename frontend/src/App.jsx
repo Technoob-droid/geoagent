@@ -72,11 +72,32 @@ export default function App() {
   };
 
   const handleZoomToLayer = (layerId) => {
-    // Reset momentarily so clicking the same layer multiple times triggers the effect
     setZoomLayerId(null);
     setTimeout(() => {
       setZoomLayerId(layerId);
     }, 10);
+  };
+
+  const handleExportLayer = async (layerId, layerName) => {
+    try {
+      const res = await fetch(`/api/layers/${layerId}/geojson`);
+      if (!res.ok) throw new Error('Failed to fetch layer GeoJSON');
+      const data = await res.json();
+
+      const blob = new Blob([JSON.stringify(data, null, 2)], {
+        type: 'application/geo+json'
+      });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `${layerName || layerId}.geojson`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error(`Export failed for layer ${layerId}:`, err);
+    }
   };
 
   return (
@@ -106,6 +127,7 @@ export default function App() {
           onToggleVisibility={handleToggleVisibility} 
           onOpacityChange={handleOpacityChange}
           onZoomToLayer={handleZoomToLayer}
+          onExportLayer={handleExportLayer}
         />
       </div>
     </div>

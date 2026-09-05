@@ -1,5 +1,5 @@
 import React from 'react';
-import { Layers, Eye, EyeOff, MapPin, Square, AlertCircle, Sliders, Focus } from 'lucide-react';
+import { Layers, Eye, EyeOff, MapPin, Square, AlertCircle, Sliders, Focus, Download } from 'lucide-react';
 
 export default function LayerCatalog({
   layers = [],
@@ -7,7 +7,8 @@ export default function LayerCatalog({
   opacities = {},
   onToggleVisibility,
   onOpacityChange,
-  onZoomToLayer
+  onZoomToLayer,
+  onExportLayer
 }) {
   const getGeomIcon = (geomType) => {
     switch (geomType?.toUpperCase()) {
@@ -68,8 +69,16 @@ export default function LayerCatalog({
                     </div>
                   </div>
 
-                  {/* Actions: Zoom to layer & Visibility toggle */}
+                  {/* Actions: Export GeoJSON, Zoom to layer, Visibility toggle */}
                   <div className="flex items-center space-x-1 ml-2 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => onExportLayer && onExportLayer(layer.layer_id, layer.name)}
+                      className="p-1.5 rounded transition text-slate-400 hover:text-emerald-300 hover:bg-slate-800"
+                      title="Download as GeoJSON"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                    </button>
                     <button
                       type="button"
                       onClick={() => onZoomToLayer && onZoomToLayer(layer.layer_id)}
