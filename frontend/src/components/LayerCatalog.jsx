@@ -1,16 +1,23 @@
 import React, { useState } from 'react';
-import { Layers, Eye, EyeOff, MapPin, Square, AlertCircle, Sliders, Focus, Download, ChevronDown } from 'lucide-react';
+import { Layers, Eye, EyeOff, MapPin, Square, AlertCircle, Sliders, Focus, Download, ChevronDown, Flame, CircleDot, Grid } from 'lucide-react';
 
 export default function LayerCatalog({
   layers = [],
   hiddenLayers = new Set(),
   opacities = {},
+  displayModes = {},
   onToggleVisibility,
   onOpacityChange,
+  onDisplayModeChange,
   onZoomToLayer,
   onExportLayer
 }) {
   const [activeExportMenu, setActiveExportMenu] = useState(null);
+
+  const isPointLayer = (geomType) => {
+    const t = geomType?.toUpperCase();
+    return t === 'POINT' || t === 'MULTIPOINT';
+  };
 
   const getGeomIcon = (geomType) => {
     switch (geomType?.toUpperCase()) {
@@ -52,7 +59,9 @@ export default function LayerCatalog({
           layers.map((layer) => {
             const isHidden = hiddenLayers.has(layer.layer_id);
             const currentOpacity = opacities[layer.layer_id] ?? 0.75;
+            const currentMode = displayModes[layer.layer_id] || 'points';
             const isMenuOpen = activeExportMenu === layer.layer_id;
+            const hasPointRendering = isPointLayer(layer.geom_type);
 
             return (
               <div
@@ -151,9 +160,57 @@ export default function LayerCatalog({
                   </div>
                 </div>
 
-                {/* Bottom row: Opacity Slider */}
+                {/* Point Layer Visualization Mode Selector */}
+                {!isHidden && hasPointRendering && (
+                  <div className="mt-2 pt-2 border-t border-slate-800/60 flex items-center justify-between text-[11px]">
+                    <span className="text-slate-400">View Style:</span>
+                    <div className="flex bg-slate-900 border border-slate-800 rounded p-0.5 space-x-0.5">
+                      <button
+                        type="button"
+                        onClick={() => onDisplayModeChange && onDisplayModeChange(layer.layer_id, 'points')}
+                        className={`px-2 py-0.5 rounded flex items-center space-x-1 text-[10px] transition ${
+                          currentMode === 'points'
+                            ? 'bg-indigo-600 text-white font-medium'
+                            : 'text-slate-400 hover:text-slate-200'
+                        }`}
+                        title="Discrete point markers"
+                      >
+                        <CircleDot className="w-3 h-3" />
+                        <span>Points</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onDisplayModeChange && onDisplayModeChange(layer.layer_id, 'clusters')}
+                        className={`px-2 py-0.5 rounded flex items-center space-x-1 text-[10px] transition ${
+                          currentMode === 'clusters'
+                            ? 'bg-indigo-600 text-white font-medium'
+                            : 'text-slate-400 hover:text-slate-200'
+                        }`}
+                        title="Cluster counts by zoom"
+                      >
+                        <Grid className="w-3 h-3" />
+                        <span>Clusters</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onDisplayModeChange && onDisplayModeChange(layer.layer_id, 'heatmap')}
+                        className={`px-2 py-0.5 rounded flex items-center space-x-1 text-[10px] transition ${
+                          currentMode === 'heatmap'
+                            ? 'bg-rose-600 text-white font-medium'
+                            : 'text-slate-400 hover:text-slate-200'
+                        }`}
+                        title="Continuous density heatmap"
+                      >
+                        <Flame className="w-3 h-3" />
+                        <span>Heatmap</span>
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Opacity Slider */}
                 {!isHidden && (
-                  <div className="mt-2.5 pt-2 border-t border-slate-800/60 flex items-center space-x-2">
+                  <div className="mt-2 pt-2 border-t border-slate-800/60 flex items-center space-x-2">
                     <Sliders className="w-3 h-3 text-slate-500 shrink-0" />
                     <input
                       type="range"

@@ -7,6 +7,7 @@ export default function App() {
   const [layers, setLayers] = useState([]);
   const [hiddenLayers, setHiddenLayers] = useState(new Set());
   const [opacities, setOpacities] = useState({});
+  const [displayModes, setDisplayModes] = useState({}); // { [layerId]: 'points' | 'clusters' | 'heatmap' }
   const [zoomLayerId, setZoomLayerId] = useState(null);
   const [viewportBbox, setViewportBbox] = useState(null);
 
@@ -17,10 +18,13 @@ export default function App() {
         if (Array.isArray(data)) {
           setLayers(data);
           const initialOpacities = {};
+          const initialModes = {};
           data.forEach((l) => {
             initialOpacities[l.layer_id] = 0.75;
+            initialModes[l.layer_id] = 'points';
           });
           setOpacities(initialOpacities);
+          setDisplayModes(initialModes);
         }
       })
       .catch((err) => console.error('Failed to fetch layers:', err));
@@ -36,6 +40,10 @@ export default function App() {
       ...prev,
       [newLayer.layer_id]: 0.75
     }));
+    setDisplayModes((prev) => ({
+      ...prev,
+      [newLayer.layer_id]: 'points'
+    }));
   };
 
   const handleDeleteLayer = (layerId) => {
@@ -46,6 +54,11 @@ export default function App() {
       return next;
     });
     setOpacities((prev) => {
+      const next = { ...prev };
+      delete next[layerId];
+      return next;
+    });
+    setDisplayModes((prev) => {
       const next = { ...prev };
       delete next[layerId];
       return next;
@@ -68,6 +81,13 @@ export default function App() {
     setOpacities((prev) => ({
       ...prev,
       [layerId]: parseFloat(value)
+    }));
+  };
+
+  const handleDisplayModeChange = (layerId, mode) => {
+    setDisplayModes((prev) => ({
+      ...prev,
+      [layerId]: mode
     }));
   };
 
@@ -136,6 +156,7 @@ export default function App() {
           layers={layers} 
           hiddenLayers={hiddenLayers} 
           opacities={opacities}
+          displayModes={displayModes}
           zoomLayerId={zoomLayerId}
           onViewportChange={setViewportBbox} 
         />
@@ -143,8 +164,10 @@ export default function App() {
           layers={layers} 
           hiddenLayers={hiddenLayers} 
           opacities={opacities}
+          displayModes={displayModes}
           onToggleVisibility={handleToggleVisibility} 
           onOpacityChange={handleOpacityChange}
+          onDisplayModeChange={handleDisplayModeChange}
           onZoomToLayer={handleZoomToLayer}
           onExportLayer={handleExportLayer}
         />
