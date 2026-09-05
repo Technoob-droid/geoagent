@@ -1,5 +1,5 @@
-import React from 'react';
-import { Layers, Eye, EyeOff, MapPin, Square, AlertCircle, Sliders, Focus, Download } from 'lucide-react';
+import React, { useState } from 'react';
+import { Layers, Eye, EyeOff, MapPin, Square, AlertCircle, Sliders, Focus, Download, ChevronDown } from 'lucide-react';
 
 export default function LayerCatalog({
   layers = [],
@@ -10,6 +10,8 @@ export default function LayerCatalog({
   onZoomToLayer,
   onExportLayer
 }) {
+  const [activeExportMenu, setActiveExportMenu] = useState(null);
+
   const getGeomIcon = (geomType) => {
     switch (geomType?.toUpperCase()) {
       case 'POINT':
@@ -23,8 +25,15 @@ export default function LayerCatalog({
     }
   };
 
+  const handleExportSelect = (layerId, layerName, format) => {
+    if (onExportLayer) {
+      onExportLayer(layerId, layerName, format);
+    }
+    setActiveExportMenu(null);
+  };
+
   return (
-    <div className="absolute top-4 right-14 w-80 max-h-[calc(100vh-2rem)] bg-slate-900/90 backdrop-blur-md border border-slate-800 rounded-lg shadow-xl flex flex-col z-20 overflow-hidden">
+    <div className="absolute top-4 right-14 w-80 max-h-[calc(100vh-2rem)] bg-slate-900/90 backdrop-blur-md border border-slate-800 rounded-lg shadow-xl flex flex-col z-20 overflow-visible">
       {/* Header */}
       <div className="p-3 border-b border-slate-800 flex items-center justify-between text-xs font-semibold text-slate-300 tracking-wider uppercase">
         <div className="flex items-center space-x-2">
@@ -43,11 +52,12 @@ export default function LayerCatalog({
           layers.map((layer) => {
             const isHidden = hiddenLayers.has(layer.layer_id);
             const currentOpacity = opacities[layer.layer_id] ?? 0.75;
+            const isMenuOpen = activeExportMenu === layer.layer_id;
 
             return (
               <div
                 key={layer.layer_id}
-                className={`p-2.5 rounded transition border ${
+                className={`p-2.5 rounded transition border relative ${
                   isHidden
                     ? 'bg-slate-950/40 border-slate-900 opacity-60'
                     : 'bg-slate-950/80 border-slate-800/80 hover:border-slate-700'
@@ -69,16 +79,51 @@ export default function LayerCatalog({
                     </div>
                   </div>
 
-                  {/* Actions: Export GeoJSON, Zoom to layer, Visibility toggle */}
-                  <div className="flex items-center space-x-1 ml-2 shrink-0">
-                    <button
-                      type="button"
-                      onClick={() => onExportLayer && onExportLayer(layer.layer_id, layer.name)}
-                      className="p-1.5 rounded transition text-slate-400 hover:text-emerald-300 hover:bg-slate-800"
-                      title="Download as GeoJSON"
-                    >
-                      <Download className="w-3.5 h-3.5" />
-                    </button>
+                  {/* Actions: Export Dropdown, Zoom to layer, Visibility toggle */}
+                  <div className="flex items-center space-x-1 ml-2 shrink-0 relative">
+                    <div className="relative">
+                      <button
+                        type="button"
+                        onClick={() => setActiveExportMenu(isMenuOpen ? null : layer.layer_id)}
+                        className={`p-1.5 rounded transition flex items-center space-x-0.5 ${
+                          isMenuOpen
+                            ? 'text-emerald-300 bg-slate-800'
+                            : 'text-slate-400 hover:text-emerald-300 hover:bg-slate-800'
+                        }`}
+                        title="Export Layer"
+                      >
+                        <Download className="w-3.5 h-3.5" />
+                        <ChevronDown className="w-2.5 h-2.5" />
+                      </button>
+
+                      {/* Export Format Popover */}
+                      {isMenuOpen && (
+                        <div className="absolute right-0 top-full mt-1 w-32 bg-slate-900 border border-slate-700 rounded shadow-xl py-1 z-30">
+                          <button
+                            type="button"
+                            onClick={() => handleExportSelect(layer.layer_id, layer.name, 'geojson')}
+                            className="w-full text-left px-3 py-1.5 text-[11px] text-slate-300 hover:bg-slate-800 hover:text-emerald-400 transition"
+                          >
+                            GeoJSON (.geojson)
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleExportSelect(layer.layer_id, layer.name, 'csv')}
+                            className="w-full text-left px-3 py-1.5 text-[11px] text-slate-300 hover:bg-slate-800 hover:text-emerald-400 transition"
+                          >
+                            CSV with WKT (.csv)
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleExportSelect(layer.layer_id, layer.name, 'shapefile')}
+                            className="w-full text-left px-3 py-1.5 text-[11px] text-slate-300 hover:bg-slate-800 hover:text-emerald-400 transition"
+                          >
+                            Shapefile (.zip)
+                          </button>
+                        </div>
+                      )}
+                    </div>
+
                     <button
                       type="button"
                       onClick={() => onZoomToLayer && onZoomToLayer(layer.layer_id)}

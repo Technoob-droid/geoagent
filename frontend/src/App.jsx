@@ -78,25 +78,44 @@ export default function App() {
     }, 10);
   };
 
-  const handleExportLayer = async (layerId, layerName) => {
+  const handleExportLayer = async (layerId, layerName, format = 'geojson') => {
     try {
-      const res = await fetch(`/api/layers/${layerId}/geojson`);
-      if (!res.ok) throw new Error('Failed to fetch layer GeoJSON');
-      const data = await res.json();
+      const cleanName = layerName || layerId;
+      let url = '';
+      let defaultFilename = '';
 
-      const blob = new Blob([JSON.stringify(data, null, 2)], {
-        type: 'application/geo+json'
-      });
-      const url = URL.createObjectURL(blob);
+      if (format === 'geojson') {
+        url = `/api/layers/${layerId}/geojson`;
+        defaultFilename = `${cleanName}.geojson`;
+      } else if (format === 'csv') {
+        url = `/api/layers/${layerId}/export/csv`;
+        defaultFilename = `${cleanName}.csv`;
+      } else if (format === 'shapefile') {
+        url = `/api/layers/${layerId}/export/shapefile`;
+        defaultFilename = `${cleanName}_shp.zip`;
+      }
+
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`Export failed with status: ${res.status}`);
+
+      let blob;
+      if (format === 'geojson') {
+        const data = await res.json();
+        blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/geo+json' });
+      } else {
+        blob = await res.blob();
+      }
+
+      const downloadUrl = URL.createObjectURL(blob);
       const link = document.createElement('a');
-      link.href = url;
-      link.download = `${layerName || layerId}.geojson`;
+      link.href = downloadUrl;
+      link.download = defaultFilename;
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
-      URL.revokeObjectURL(url);
+      URL.revokeObjectURL(downloadUrl);
     } catch (err) {
-      console.error(`Export failed for layer ${layerId}:`, err);
+      console.error(`Export (${format}) failed for layer ${layerId}:`, err);
     }
   };
 
