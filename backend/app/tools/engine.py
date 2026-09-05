@@ -1,3 +1,4 @@
+import os
 import duckdb
 import json
 import logging
@@ -6,12 +7,14 @@ from backend.app.config import settings
 
 logger = logging.getLogger("geoagent.spatial_engine")
 
+
 class DuckDBSpatialEngine:
     def __init__(self, db_path: Optional[str] = None):
         self.db_path = db_path or settings.DUCKDB_DATABASE_PATH
         self.con = duckdb.connect(self.db_path)
         self._init_spatial_extension()
         self._init_catalog_table()
+        self._register_boundary_views()
 
     def _init_spatial_extension(self):
         """Installs and loads the DuckDB spatial extension."""
@@ -36,6 +39,35 @@ class DuckDBSpatialEngine:
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         """)
+
+    def _register_boundary_views(self):
+        """Registers persistent views for all tiered administrative and settlement GeoParquet files."""
+        boundaries_base = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "../../data/boundaries")
+        ).replace("\\", "/")
+
+        tables = {
+            "india_states": f"{boundaries_base}/states/india_states.parquet",
+            "india_districts": f"{boundaries_base}/districts/india_districts.parquet",
+            "india_subdistricts": f"{boundaries_base}/subdistricts/india_subdistricts.parquet",
+            "india_cities": f"{boundaries_base}/cities/india_cities.parquet",
+            "india_villages": f"{boundaries_base}/villages/india_villages.parquet",
+        }
+
+        for table_name, parquet_path in tables.items():
+            if os.path.exists(parquet_path):
+                try:
+                    self.con.execute(f"""
+                        CREATE OR REPLACE VIEW {table_name} AS 
+                        SELECT * FROM read_parquet('{parquet_path}');
+                    """)
+                    logger.info(f"Registered spatial boundary view: {table_name}")
+                except Exception as e:
+                    logger.warning(f"Failed to register view {table_name}: {e}")
+
+    def execute_query(self, sql: str):
+        """Executes a direct read-only query and returns a pandas DataFrame."""
+        return self.con.execute(sql).df()
 
     def execute_spatial_query(
         self,
@@ -132,10 +164,10 @@ class DuckDBSpatialEngine:
 
     def get_layer_as_geojson(self, layer_id: str) -> Optional[Dict[str, Any]]:
         """
-        Exports a materialized layer as a standard GeoJSON FeatureCollection.
+        Exports a materialized layer or view as a GeoJSON FeatureCollection.
         """
         try:
-            # 1. Check table existence
+            # Check table or view existence
             table_check = self.con.execute(f"""
                 SELECT COUNT(*) 
                 FROM information_schema.tables 
@@ -143,23 +175,24 @@ class DuckDBSpatialEngine:
             """).fetchone()
 
             if not table_check or table_check[0] == 0:
-                logger.warning(f"Table '{layer_id}' not found in database.")
+                logger.warning(f"Table/View '{layer_id}' not found in database.")
                 return None
 
-            # 2. Extract column schema
+            # Extract column schema
             cols = [c[0] for c in self.con.execute(f"DESCRIBE {layer_id};").fetchall()]
             non_geom_cols = [c for c in cols if c.lower() not in ["geom", "geometry"]]
             
             quoted_non_geom = [f'"{c}"' for c in non_geom_cols]
             prop_select = ", ".join(quoted_non_geom) if quoted_non_geom else "NULL as _dummy"
 
-            # 3. Retrieve attributes along with GeoJSON geometry string
+            # Retrieve attributes along with GeoJSON geometry string
             sql = f"""
                 SELECT 
                     {prop_select},
                     ST_AsGeoJSON(geom) as geojson_geom
                 FROM {layer_id}
-                WHERE geom IS NOT NULL;
+                WHERE geom IS NOT NULL
+                LIMIT 5000;
             """
             rows = self.con.execute(sql).fetchall()
 
@@ -188,6 +221,7 @@ class DuckDBSpatialEngine:
         except Exception as e:
             logger.error(f"Error generating GeoJSON for layer '{layer_id}': {e}", exc_info=True)
             return None
+
 
 # Singleton spatial engine instance
 spatial_engine = DuckDBSpatialEngine()

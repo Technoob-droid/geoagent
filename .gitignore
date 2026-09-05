@@ -81,3 +81,6 @@ frontend/build/
 .idea/
 .DS_Store
 Thumbs.db
+# Raw large geospatial downloads
+backend/data/raw/
+*.geojson

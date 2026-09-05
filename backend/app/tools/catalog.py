@@ -1,84 +1,146 @@
 import json
+import logging
 from typing import List, Dict, Any, Optional
 from backend.app.tools.engine import spatial_engine
 
-class LayerCatalogManager:
-    """Manages discoverability and inspection of spatial datasets for the LLM agent."""
+logger = logging.getLogger("geoagent.catalog")
 
-    @staticmethod
-    def list_layers() -> List[Dict[str, Any]]:
-        """Returns all registered layers with summary metadata."""
-        rows = spatial_engine.con.execute("""
-            SELECT layer_id, name, description, geom_type, feature_count, bbox_json, columns_json
-            FROM spatial_catalog
-            ORDER BY created_at DESC;
-        """).fetchall()
+# Base system catalog describing all pre-ingested administrative boundaries
+ADMIN_BOUNDARIES_CATALOG = [
+    {
+        "layer_id": "india_states",
+        "name": "India States & UTs (ADM1)",
+        "description": "Administrative boundaries for all 36 States and Union Territories of India.",
+        "geom_type": "MULTIPOLYGON",
+        "feature_count": 36,
+        "columns": ["state_name", "raw_state_name", "state_iso", "shape_id", "geom"],
+        "is_system": True
+    },
+    {
+        "layer_id": "india_districts",
+        "name": "India Districts (ADM2)",
+        "description": "Administrative boundaries for 735 Indian Districts with state ISO references.",
+        "geom_type": "MULTIPOLYGON",
+        "feature_count": 735,
+        "columns": ["district_name", "raw_district_name", "state_iso", "shape_id", "geom"],
+        "is_system": True
+    },
+    {
+        "layer_id": "india_subdistricts",
+        "name": "India Sub-districts / Tehsils (ADM3)",
+        "description": "Administrative boundaries for 6,824 Sub-districts, Tehsils, and Taluks across India.",
+        "geom_type": "MULTIPOLYGON",
+        "feature_count": 6824,
+        "columns": ["subdistrict_name", "raw_subdistrict_name", "parent_iso", "shape_id", "geom"],
+        "is_system": True
+    },
+    {
+        "layer_id": "india_cities",
+        "name": "India Cities & Urban Settlements",
+        "description": "Populated city centers, statutory towns, municipal corporations, and major urban agglomerations.",
+        "geom_type": "POINT",
+        "feature_count": 214,
+        "columns": ["city_name", "state_name", "country", "feature_class", "population", "geom"],
+        "is_system": True
+    },
+    {
+        "layer_id": "india_villages",
+        "name": "India Revenue Villages & Populated Places (ADM4)",
+        "description": "557,995 rural revenue villages and populated places indexed with state codes.",
+        "geom_type": "POINT",
+        "feature_count": 557995,
+        "columns": ["village_name", "raw_name", "state_code", "feature_code", "geom"],
+        "is_system": True
+    }
+]
 
-        layers = []
-        for r in rows:
-            layers.append({
-                "layer_id": r[0],
-                "name": r[1],
-                "description": r[2],
-                "geom_type": r[3],
-                "feature_count": r[4],
-                "bbox": json.loads(r[5]) if r[5] else None,
-                "columns": json.loads(r[6]) if r[6] else []
-            })
+
+class CatalogManager:
+    def __init__(self):
+        self.engine = spatial_engine
+
+    def list_layers(self) -> List[Dict[str, Any]]:
+        """
+        Lists all available layers, merging base administrative boundary layers
+        with user-generated analytical layers stored in spatial_catalog.
+        """
+        layers = list(ADMIN_BOUNDARIES_CATALOG)
+
+        try:
+            rows = self.engine.con.execute("""
+                SELECT layer_id, name, description, geom_type, feature_count, bbox_json, columns_json, created_at 
+                FROM spatial_catalog 
+                ORDER BY created_at DESC;
+            """).fetchall()
+
+            for r in rows:
+                layers.append({
+                    "layer_id": r[0],
+                    "name": r[1],
+                    "description": r[2],
+                    "geom_type": r[3],
+                    "feature_count": r[4],
+                    "bbox": json.loads(r[5]) if r[5] else None,
+                    "columns": json.loads(r[6]) if r[6] else [],
+                    "created_at": str(r[7]),
+                    "is_system": False
+                })
+        except Exception as e:
+            logger.error(f"Error listing layers from spatial_catalog: {e}")
+
         return layers
 
-    @staticmethod
-    def get_layer_details(layer_id: str) -> Optional[Dict[str, Any]]:
-        """Returns detailed schema, bounds, and sample records for a layer."""
-        row = spatial_engine.con.execute(f"""
-            SELECT layer_id, name, description, geom_type, feature_count, bbox_json, columns_json
-            FROM spatial_catalog
-            WHERE layer_id = '{layer_id}';
-        """).fetchone()
+    def get_layer_details(self, layer_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Retrieves schema, feature counts, and column metadata for a specific layer.
+        """
+        # Check system boundary layers first
+        for admin_layer in ADMIN_BOUNDARIES_CATALOG:
+            if admin_layer["layer_id"] == layer_id:
+                return admin_layer
 
-        if not row:
-            return None
+        # Check user analytical tables
+        try:
+            row = self.engine.con.execute(f"""
+                SELECT layer_id, name, description, geom_type, feature_count, bbox_json, columns_json, created_at 
+                FROM spatial_catalog 
+                WHERE layer_id = '{layer_id}';
+            """).fetchone()
 
-        # Sample 3 non-geometry rows for LLM context grounding
-        sample_rows = spatial_engine.con.execute(f"""
-            SELECT * EXCLUDE (geom)
-            FROM {layer_id}
-            LIMIT 3;
-        """).fetchdf().to_dict(orient="records")
+            if row:
+                return {
+                    "layer_id": row[0],
+                    "name": row[1],
+                    "description": row[2],
+                    "geom_type": row[3],
+                    "feature_count": row[4],
+                    "bbox": json.loads(row[5]) if row[5] else None,
+                    "columns": json.loads(row[6]) if row[6] else [],
+                    "created_at": str(row[7]),
+                    "is_system": False
+                }
+        except Exception as e:
+            logger.error(f"Error fetching details for layer '{layer_id}': {e}")
 
-        return {
-            "layer_id": row[0],
-            "name": row[1],
-            "description": row[2],
-            "geom_type": row[3],
-            "feature_count": row[4],
-            "bbox": json.loads(row[5]) if row[5] else None,
-            "columns": json.loads(row[6]) if row[6] else [],
-            "sample_data": sample_rows
-        }
+        return None
 
-    @staticmethod
-    def get_catalog_summary_prompt() -> str:
-        """Constructs a concise summary string to inject into the Agent's system context."""
-        layers = LayerCatalogManager.list_layers()
-        if not layers:
-            return "No layers currently loaded in the database."
-
-        summary_lines = ["Currently available active layers:"]
-        for lyr in layers:
+    def get_catalog_summary_for_llm(self) -> str:
+        """
+        Formats catalog layer descriptions, columns, and spatial types
+        into a clean context prompt for the LLM agent.
+        """
+        all_layers = self.list_layers()
+        summary_lines = []
+        for l in all_layers:
+            cols = ", ".join(l.get("columns", []))
             summary_lines.append(
-                f"- ID: `{lyr['layer_id']}` | Name: {lyr['name']} | Type: {lyr['geom_type']} | Features: {lyr['feature_count']} | Columns: {', '.join(lyr['columns'])}"
+                f"- Layer '{l['layer_id']}' ({l.get('geom_type', 'GEOMETRY')}, ~{l.get('feature_count', 0)} rows): "
+                f"{l.get('description', '')}. Columns: [{cols}]"
             )
         return "\n".join(summary_lines)
 
-    @staticmethod
-    def delete_layer(layer_id: str) -> bool:
-        """Drops the layer table and deletes its metadata record from spatial_catalog."""
-        try:
-            spatial_engine.con.execute(f"DROP TABLE IF EXISTS {layer_id};")
-            spatial_engine.con.execute(f"DELETE FROM spatial_catalog WHERE layer_id = '{layer_id}';")
-            return True
-        except Exception:
-            return False
+    # Backward-compatible alias for prompt templates
+    get_catalog_summary_prompt = get_catalog_summary_for_llm
 
-catalog_manager = LayerCatalogManager()
+
+catalog_manager = CatalogManager()

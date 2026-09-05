@@ -34,13 +34,15 @@ llm = ChatGroq(
     groq_api_key=groq_key,
 ).bind_tools(ALL_SPATIAL_TOOLS)
 
-def agent_node(state: AgentState) -> dict:
-    """Evaluates conversation and invokes spatial tools or prepares natural language answer."""
+
+async def agent_node(state: AgentState) -> dict:
+    """Evaluates conversation and invokes spatial tools or prepares natural language answer asynchronously."""
     sys_prompt = get_system_prompt()
     messages = [SystemMessage(content=sys_prompt)] + list(state["messages"])
     
-    response = llm.invoke(messages)
+    response = await llm.ainvoke(messages)
     return {"messages": [response]}
+
 
 def post_tool_evaluator(state: AgentState) -> dict:
     """Inspects tool messages to record generated/deleted layers and detect runtime errors."""
@@ -78,6 +80,7 @@ def post_tool_evaluator(state: AgentState) -> dict:
         "error_count": error_count,
     }
 
+
 def route_after_agent(state: AgentState) -> Literal["tools", "__end__"]:
     """Determines whether the agent needs tool execution or can answer directly."""
     last_msg = state["messages"][-1]
@@ -85,12 +88,14 @@ def route_after_agent(state: AgentState) -> Literal["tools", "__end__"]:
         return "tools"
     return END
 
+
 def route_after_tools(state: AgentState) -> Literal["agent", "__end__"]:
     """Prevents runaway loops if errors repeat."""
     if state.get("error_count", 0) > 3:
         logger.warning("Max error threshold exceeded in agent cycle.")
         return END
     return "agent"
+
 
 # Build State Graph
 builder = StateGraph(AgentState)

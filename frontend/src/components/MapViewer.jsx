@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
-import { Ruler, Pentagon, MapPin, X } from 'lucide-react';
+import { Ruler, Pentagon, MapPin, X, Search, Loader2 } from 'lucide-react';
 
 const CURRENT_LOCATION = [88.3639, 22.5726]; // Kolkata coordinates [lng, lat]
 
@@ -84,7 +84,7 @@ export default function MapViewer({
   const loadedLayersRef = useRef(new Map());
   const initialZoomDoneRef = useRef(false);
 
-  // User coordinate tracking (defaults to central Kolkata)
+  // User coordinate tracking
   const [userCoord, setUserCoord] = useState(CURRENT_LOCATION);
   const userCoordRef = useRef(CURRENT_LOCATION);
   userCoordRef.current = userCoord;
@@ -95,6 +95,106 @@ export default function MapViewer({
   const [measureResult, setMeasureResult] = useState(null);
   const measurePointsRef = useRef([]);
   measurePointsRef.current = measurePoints;
+
+  // Place Search & Auto-Zoom State
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState([]);
+  const [isSearching, setIsSearching] = useState(false);
+  const [isSearchOpen, setIsSearchOpen] = useState(false);
+  const searchDropdownRef = useRef(null);
+
+  // Fetch and update boundary polygons for current visible bounds
+  const updateViewportBoundaries = async () => {
+    const map = mapRef.current;
+    if (!map) return;
+
+    const zoom = map.getZoom();
+    const bounds = map.getBounds();
+    const level = zoom >= 7.5 ? 'districts' : 'states';
+
+    const minX = bounds.getWest();
+    const minY = bounds.getSouth();
+    const maxX = bounds.getEast();
+    const maxY = bounds.getNorth();
+
+    try {
+      const res = await fetch(
+        `/api/layers/boundaries/query?level=${level}&min_x=${minX}&min_y=${minY}&max_x=${maxX}&max_y=${maxY}`
+      );
+      if (!res.ok) return;
+      const geojson = await res.json();
+
+      const src = map.getSource('admin-boundaries-source');
+      if (src) {
+        src.setData(geojson);
+      }
+    } catch (err) {
+      console.error('Failed to stream administrative boundaries:', err);
+    }
+  };
+
+  // Close place search when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (e) => {
+      if (searchDropdownRef.current && !searchDropdownRef.current.contains(e.target)) {
+        setIsSearchOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  // Debounced search for States / Districts
+  useEffect(() => {
+    if (searchQuery.trim().length < 2) {
+      setSearchResults([]);
+      setIsSearchOpen(false);
+      return;
+    }
+
+    const timer = setTimeout(async () => {
+      setIsSearching(true);
+      try {
+        const res = await fetch(`/api/layers/resolver/search?query=${encodeURIComponent(searchQuery.trim())}`);
+        if (res.ok) {
+          const data = await res.json();
+          setSearchResults(data.results || []);
+          setIsSearchOpen(true);
+        }
+      } catch (err) {
+        console.error('Place resolver search failed:', err);
+      } finally {
+        setIsSearching(false);
+      }
+    }, 250);
+
+    return () => clearTimeout(timer);
+  }, [searchQuery]);
+
+  // Zoom to chosen state or district
+  const handleSelectPlace = (place) => {
+    const map = mapRef.current;
+    if (!map) return;
+
+    setIsSearchOpen(false);
+    setSearchQuery(place.name);
+
+    if (place.min_x != null && place.min_y != null && place.max_x != null && place.max_y != null) {
+      map.fitBounds(
+        [
+          [place.min_x, place.min_y],
+          [place.max_x, place.max_y]
+        ],
+        { padding: 50, duration: 1200 }
+      );
+    } else if (place.center_x != null && place.center_y != null) {
+      map.flyTo({
+        center: [place.center_x, place.center_y],
+        zoom: place.type === 'state' ? 6 : 9,
+        duration: 1200
+      });
+    }
+  };
 
   // Initialize Map
   useEffect(() => {
@@ -135,6 +235,33 @@ export default function MapViewer({
     });
 
     map.on('load', () => {
+      // Dynamic Administrative Boundaries Layer
+      map.addSource('admin-boundaries-source', {
+        type: 'geojson',
+        data: { type: 'FeatureCollection', features: [] }
+      });
+
+      map.addLayer({
+        id: 'admin-boundaries-fill',
+        type: 'fill',
+        source: 'admin-boundaries-source',
+        paint: {
+          'fill-color': '#6366f1',
+          'fill-opacity': 0.04
+        }
+      });
+
+      map.addLayer({
+        id: 'admin-boundaries-line',
+        type: 'line',
+        source: 'admin-boundaries-source',
+        paint: {
+          'line-color': '#818cf8',
+          'line-width': 1.2,
+          'line-opacity': 0.45
+        }
+      });
+
       // User location source & pulsing halo
       map.addSource('user-current-location', {
         type: 'geojson',
@@ -216,9 +343,11 @@ export default function MapViewer({
 
       mapRef.current = map;
       setMapReady(true);
+      updateViewportBoundaries();
     });
 
     map.on('moveend', () => {
+      updateViewportBoundaries();
       if (onViewportChange) {
         const bounds = map.getBounds();
         onViewportChange([
@@ -702,69 +831,121 @@ export default function MapViewer({
         }
       `}</style>
 
-      {/* Floating Measurement Toolbar */}
-      <div className="absolute top-4 left-4 z-20 flex items-center space-x-1.5 bg-slate-900/90 backdrop-blur-md border border-slate-800 rounded-lg p-1.5 shadow-xl text-xs">
-        <button
-          type="button"
-          onClick={() => {
-            setMeasureMode(measureMode === 'distance' ? null : 'distance');
-            setMeasurePoints([]);
-          }}
-          className={`flex items-center space-x-1.5 px-2.5 py-1.5 rounded transition ${
-            measureMode === 'distance'
-              ? 'bg-pink-600 text-white font-medium'
-              : 'text-slate-300 hover:bg-slate-800'
-          }`}
-          title="Measure distance along polyline"
-        >
-          <Ruler className="w-3.5 h-3.5" />
-          <span>Distance</span>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => {
-            setMeasureMode(measureMode === 'area' ? null : 'area');
-            setMeasurePoints([]);
-          }}
-          className={`flex items-center space-x-1.5 px-2.5 py-1.5 rounded transition ${
-            measureMode === 'area'
-              ? 'bg-pink-600 text-white font-medium'
-              : 'text-slate-300 hover:bg-slate-800'
-          }`}
-          title="Measure polygon surface area"
-        >
-          <Pentagon className="w-3.5 h-3.5" />
-          <span>Area</span>
-        </button>
-
-        <button
-          type="button"
-          onClick={handleStartFromCurrentLocation}
-          className="flex items-center space-x-1.5 px-2.5 py-1.5 rounded text-sky-400 hover:bg-slate-800 transition"
-          title="Start distance measurement directly from your current position"
-        >
-          <MapPin className="w-3.5 h-3.5 text-sky-400" />
-          <span>From Here</span>
-        </button>
-
-        {measureMode && (
+      {/* Top Floating Control Bar: Measurement Tools + Nationwide Place Search */}
+      <div className="absolute top-4 left-4 z-20 flex flex-wrap items-center gap-2">
+        {/* Measurement Toolbar */}
+        <div className="flex items-center space-x-1.5 bg-slate-900/90 backdrop-blur-md border border-slate-800 rounded-lg p-1.5 shadow-xl text-xs">
           <button
             type="button"
-            onClick={handleResetMeasure}
-            className="p-1.5 text-slate-400 hover:text-rose-400 hover:bg-slate-800 rounded transition"
-            title="Clear measurement"
+            onClick={() => {
+              setMeasureMode(measureMode === 'distance' ? null : 'distance');
+              setMeasurePoints([]);
+            }}
+            className={`flex items-center space-x-1.5 px-2.5 py-1.5 rounded transition ${
+              measureMode === 'distance'
+                ? 'bg-pink-600 text-white font-medium'
+                : 'text-slate-300 hover:bg-slate-800'
+            }`}
+            title="Measure distance along polyline"
           >
-            <X className="w-3.5 h-3.5" />
+            <Ruler className="w-3.5 h-3.5" />
+            <span>Distance</span>
           </button>
-        )}
 
-        {/* Live Calculation Output Badge */}
-        {measureResult && (
-          <div className="ml-2 pl-2 border-l border-slate-700 text-emerald-400 font-mono font-semibold px-2">
-            {measureResult}
+          <button
+            type="button"
+            onClick={() => {
+              setMeasureMode(measureMode === 'area' ? null : 'area');
+              setMeasurePoints([]);
+            }}
+            className={`flex items-center space-x-1.5 px-2.5 py-1.5 rounded transition ${
+              measureMode === 'area'
+                ? 'bg-pink-600 text-white font-medium'
+                : 'text-slate-300 hover:bg-slate-800'
+            }`}
+            title="Measure polygon surface area"
+          >
+            <Pentagon className="w-3.5 h-3.5" />
+            <span>Area</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={handleStartFromCurrentLocation}
+            className="flex items-center space-x-1.5 px-2.5 py-1.5 rounded text-sky-400 hover:bg-slate-800 transition"
+            title="Start distance measurement directly from your current position"
+          >
+            <MapPin className="w-3.5 h-3.5 text-sky-400" />
+            <span>From Here</span>
+          </button>
+
+          {measureMode && (
+            <button
+              type="button"
+              onClick={handleResetMeasure}
+              className="p-1.5 text-slate-400 hover:text-rose-400 hover:bg-slate-800 rounded transition"
+              title="Clear measurement"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          )}
+
+          {measureResult && (
+            <div className="ml-2 pl-2 border-l border-slate-700 text-emerald-400 font-mono font-semibold px-2">
+              {measureResult}
+            </div>
+          )}
+        </div>
+
+        {/* Nationwide Place Resolver Search Bar */}
+        <div ref={searchDropdownRef} className="relative w-64 text-xs">
+          <div className="flex items-center bg-slate-900/90 backdrop-blur-md border border-slate-800 rounded-lg px-2.5 py-2 shadow-xl focus-within:border-indigo-500 transition">
+            <Search className="w-3.5 h-3.5 text-slate-400 mr-2 shrink-0" />
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Search State or District..."
+              className="bg-transparent text-slate-200 placeholder-slate-500 focus:outline-none w-full text-xs"
+            />
+            {isSearching && <Loader2 className="w-3 h-3 text-indigo-400 animate-spin mr-1 shrink-0" />}
+            {searchQuery && !isSearching && (
+              <button
+                type="button"
+                onClick={() => {
+                  setSearchQuery('');
+                  setSearchResults([]);
+                  setIsSearchOpen(false);
+                }}
+                className="text-slate-500 hover:text-slate-300"
+              >
+                <X className="w-3 h-3" />
+              </button>
+            )}
           </div>
-        )}
+
+          {isSearchOpen && searchResults.length > 0 && (
+            <div className="absolute top-full left-0 right-0 mt-1.5 bg-slate-900 border border-slate-800 rounded-lg shadow-2xl py-1 z-50 max-h-60 overflow-y-auto">
+              {searchResults.map((r, idx) => (
+                <button
+                  key={`${r.name}-${idx}`}
+                  type="button"
+                  onClick={() => handleSelectPlace(r)}
+                  className="w-full text-left px-3 py-2 hover:bg-slate-800 flex items-center justify-between text-slate-200 transition"
+                >
+                  <div className="flex items-center space-x-2 truncate">
+                    <MapPin className="w-3 h-3 text-indigo-400 shrink-0" />
+                    <span className="font-medium truncate">{r.name}</span>
+                    <span className="text-[10px] text-slate-400 truncate">({r.parent})</span>
+                  </div>
+                  <span className="text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-slate-800 text-slate-400 shrink-0 ml-2 border border-slate-700">
+                    {r.type}
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
 
       <div
