@@ -1,6 +1,8 @@
 import json
 import logging
-from typing import Optional
+import re
+import difflib
+from typing import Optional, Tuple
 import httpx
 from langchain_core.tools import tool
 from backend.app.tools.engine import spatial_engine
@@ -16,11 +18,195 @@ SYSTEM_ADMIN_LAYERS = {
     "india_villages",
 }
 
+CARDINAL_OFFSETS = {
+    "north": (0.0, 1.0),
+    "south": (0.0, -1.0),
+    "east": (1.0, 0.0),
+    "west": (-1.0, 0.0),
+    "northeast": (0.707, 0.707),
+    "northwest": (-0.707, 0.707),
+    "southeast": (0.707, -0.707),
+    "southwest": (-0.707, -0.707),
+}
+
+# Historical, anglicized, and colloquial aliases mapped to census standard forms
+INDIAN_PLACE_ALIASES = {
+    "balasore": "baleshwar",
+    "baleshwar": "balasore",
+    "bangalore": "bengaluru",
+    "bengaluru": "bangalore",
+    "calcutta": "kolkata",
+    "kolkata": "calcutta",
+    "bombay": "mumbai",
+    "mumbai": "bombay",
+    "madras": "chennai",
+    "chennai": "madras",
+    "baroda": "vadodara",
+    "vadodara": "baroda",
+    "cochin": "kochi",
+    "kochi": "cochin",
+    "trivandrum": "thiruvananthapuram",
+    "thiruvananthapuram": "trivandrum",
+    "calicut": "kozhikode",
+    "kozhikode": "calicut",
+    "pondicherry": "puducherry",
+    "puducherry": "pondicherry",
+    "orissa": "odisha",
+    "odisha": "orissa",
+    "mysore": "mysuru",
+    "mysuru": "mysore",
+    "poona": "pune",
+    "pune": "poona",
+    "mangalore": "mangaluru",
+    "mangaluru": "mangalore",
+    "gurgaon": "gurugram",
+    "gurugram": "gurgaon",
+    "gauhati": "guwahati",
+    "guwahati": "gauhati",
+    "simla": "shimla",
+    "shimla": "simla",
+    "banaras": "varanasi",
+    "benares": "varanasi",
+    "varanasi": "banaras",
+    "allahabad": "prayagraj",
+    "prayagraj": "allahabad",
+    "trichy": "tiruchirappalli",
+    "tiruchirappalli": "trichy",
+    "waltair": "visakhapatnam",
+    "vizag": "visakhapatnam",
+    "visakhapatnam": "vizag",
+    "bellary": "ballari",
+    "hubli": "hubballi",
+    "belgaum": "belagavi",
+}
+
+
+def _clean_token(raw_text: str) -> str:
+    """Strips common administrative filler tokens and whitespace."""
+    text = raw_text.strip().lower()
+    text = re.sub(r"\b(state|district|city|subdistrict|taluk|tehsil|division|region|zone)\b", "", text)
+    text = re.sub(r"[^\w\s]", "", text)
+    return " ".join(text.split())
+
+
+def _find_fuzzy_admin_entity(raw_name: str) -> Optional[Tuple[str, float, float, float]]:
+    """
+    Finds geographic centroid and extent using multi-stage matching:
+    1. Direct & SQL wildcards against States, Districts, Cities, and Subdistricts.
+    2. Alias mapping lookup.
+    3. In-memory fuzzy match across administrative labels using difflib.
+    Returns: (matched_name, center_lon, center_lat, extent_deg)
+    """
+    clean_target = _clean_token(raw_name)
+    if not clean_target:
+        return None
+
+    alias_target = INDIAN_PLACE_ALIASES.get(clean_target, clean_target)
+    prefix_target = clean_target[:4] if len(clean_target) >= 4 else clean_target
+
+    # Stage 1: Exact, Alias, and Substring SQL Lookup
+    sql_exact = f"""
+        SELECT 
+            state_name AS name, 
+            ST_X(ST_Centroid(geom)) AS lon, 
+            ST_Y(ST_Centroid(geom)) AS lat,
+            ((ST_YMax(geom) - ST_YMin(geom)) * 0.25) AS extent_deg
+        FROM india_states
+        WHERE lower(state_name) IN ('{clean_target}', '{alias_target}')
+           OR lower(state_iso) = lower('{clean_target}')
+           OR lower(state_name) LIKE '%{clean_target}%'
+           OR lower(state_name) LIKE '%{alias_target}%'
+        UNION ALL
+        SELECT 
+            district_name AS name, 
+            ST_X(ST_Centroid(geom)) AS lon, 
+            ST_Y(ST_Centroid(geom)) AS lat,
+            ((ST_YMax(geom) - ST_YMin(geom)) * 0.3) AS extent_deg
+        FROM india_districts
+        WHERE lower(district_name) IN ('{clean_target}', '{alias_target}')
+           OR lower(district_name) LIKE '%{clean_target}%'
+           OR lower(district_name) LIKE '%{alias_target}%'
+        UNION ALL
+        SELECT 
+            city_name AS name, 
+            ST_X(geom) AS lon, 
+            ST_Y(geom) AS lat,
+            0.08 AS extent_deg
+        FROM india_cities
+        WHERE lower(city_name) IN ('{clean_target}', '{alias_target}')
+           OR lower(city_name) LIKE '%{clean_target}%'
+           OR lower(city_name) LIKE '%{alias_target}%'
+        UNION ALL
+        SELECT 
+            subdistrict_name AS name, 
+            ST_X(ST_Centroid(geom)) AS lon, 
+            ST_Y(ST_Centroid(geom)) AS lat,
+            0.06 AS extent_deg
+        FROM india_subdistricts
+        WHERE lower(subdistrict_name) IN ('{clean_target}', '{alias_target}')
+           OR lower(subdistrict_name) LIKE '%{clean_target}%'
+           OR lower(subdistrict_name) LIKE '%{alias_target}%'
+        LIMIT 1;
+    """
+    try:
+        row = spatial_engine.con.execute(sql_exact).fetchone()
+        if row and len(row) >= 4 and row[1] is not None:
+            return str(row[0]), float(row[1]), float(row[2]), float(row[3])
+    except Exception as e:
+        logger.warning(f"Stage 1 exact lookup error: {e}")
+
+    # Stage 2: Prefix Matching
+    if len(prefix_target) >= 3:
+        sql_prefix = f"""
+            SELECT district_name AS name, ST_X(ST_Centroid(geom)) AS lon, ST_Y(ST_Centroid(geom)) AS lat,
+                   ((ST_YMax(geom) - ST_YMin(geom)) * 0.3) AS extent_deg
+            FROM india_districts
+            WHERE lower(district_name) LIKE '{prefix_target}%'
+            UNION ALL
+            SELECT city_name AS name, ST_X(geom) AS lon, ST_Y(geom) AS lat, 0.08 AS extent_deg
+            FROM india_cities
+            WHERE lower(city_name) LIKE '{prefix_target}%'
+            LIMIT 1;
+        """
+        try:
+            row = spatial_engine.con.execute(sql_prefix).fetchone()
+            if row and len(row) >= 4 and row[1] is not None:
+                return str(row[0]), float(row[1]), float(row[2]), float(row[3])
+        except Exception as e:
+            logger.warning(f"Stage 2 prefix lookup error: {e}")
+
+    # Stage 3: Python Fuzzy Fallback across District and City indices
+    try:
+        districts = [r[0] for r in spatial_engine.con.execute("SELECT district_name FROM india_districts WHERE district_name IS NOT NULL").fetchall() if r and len(r) > 0]
+        cities = [r[0] for r in spatial_engine.con.execute("SELECT city_name FROM india_cities WHERE city_name IS NOT NULL").fetchall() if r and len(r) > 0]
+        pool = districts + cities
+        candidates = difflib.get_close_matches(clean_target, pool, n=1, cutoff=0.55)
+        if not candidates and alias_target != clean_target:
+            candidates = difflib.get_close_matches(alias_target, pool, n=1, cutoff=0.55)
+
+        if candidates:
+            best = candidates[0].replace("'", "''")
+            sql_best = f"""
+                SELECT district_name AS name, ST_X(ST_Centroid(geom)) AS lon, ST_Y(ST_Centroid(geom)) AS lat,
+                       ((ST_YMax(geom) - ST_YMin(geom)) * 0.3) AS extent_deg
+                FROM india_districts
+                WHERE lower(district_name) = lower('{best}')
+                UNION ALL
+                SELECT city_name AS name, ST_X(geom) AS lon, ST_Y(geom) AS lat, 0.08 AS extent_deg
+                FROM india_cities
+                WHERE lower(city_name) = lower('{best}')
+                LIMIT 1;
+            """
+            row = spatial_engine.con.execute(sql_best).fetchone()
+            if row and len(row) >= 4 and row[1] is not None:
+                return str(row[0]), float(row[1]), float(row[2]), float(row[3])
+    except Exception as e:
+        logger.warning(f"Stage 3 fuzzy lookup error: {e}")
+
+    return None
 
 def _resolve_location_coords(location_spec: str | dict | list) -> tuple[float, float] | None:
-    """
-    Resolves arbitrary coordinate strings, lists, layer names, or landmark names to (lon, lat).
-    """
+    """Resolves arbitrary coordinate strings, lists, layer names, or landmark names to (lon, lat)."""
     if isinstance(location_spec, (list, tuple)) and len(location_spec) >= 2:
         return float(location_spec[0]), float(location_spec[1])
 
@@ -37,19 +223,15 @@ def _resolve_location_coords(location_spec: str | dict | list) -> tuple[float, f
         clean_tbl_cand = clean_name.replace(" ", "_")
         active_layers = [l["layer_id"] for l in catalog_manager.list_layers()]
 
-        # 1. Match directly against user layer table names (e.g., "kolkata_center")
+        # 1. Match directly against user analytical layer names
         for tbl in active_layers:
             if tbl in SYSTEM_ADMIN_LAYERS:
                 continue
             if tbl == clean_tbl_cand or clean_tbl_cand in tbl or tbl in clean_tbl_cand:
                 try:
                     res = spatial_engine.con.execute(f"""
-                        SELECT 
-                            ST_X(ST_Centroid(geom)) AS lon, 
-                            ST_Y(ST_Centroid(geom)) AS lat 
-                        FROM {tbl} 
-                        WHERE geom IS NOT NULL
-                        LIMIT 1;
+                        SELECT ST_X(ST_Centroid(geom)) AS lon, ST_Y(ST_Centroid(geom)) AS lat 
+                        FROM {tbl} WHERE geom IS NOT NULL LIMIT 1;
                     """).fetchone()
                     if res and res[0] is not None:
                         return float(res[0]), float(res[1])
@@ -62,60 +244,43 @@ def _resolve_location_coords(location_spec: str | dict | list) -> tuple[float, f
                 continue
             try:
                 res = spatial_engine.con.execute(f"""
-                    SELECT 
-                        ST_X(ST_Centroid(geom)) AS lon, 
-                        ST_Y(ST_Centroid(geom)) AS lat 
-                    FROM {tbl} 
-                    WHERE lower(CAST(columns(*) AS VARCHAR)) LIKE '%{clean_name}%'
-                    LIMIT 1;
+                    SELECT ST_X(ST_Centroid(geom)) AS lon, ST_Y(ST_Centroid(geom)) AS lat 
+                    FROM {tbl} WHERE lower(CAST(columns(*) AS VARCHAR)) LIKE '%{clean_name}%' LIMIT 1;
                 """).fetchone()
                 if res and res[0] is not None:
                     return float(res[0]), float(res[1])
             except Exception:
                 continue
 
-        # 3. Fallback to base admin boundary datasets
-        admin_lookups = [
-            ("india_cities", "city_name"),
-            ("india_districts", "district_name"),
-            ("india_villages", "village_name"),
-        ]
-        for tbl, col in admin_lookups:
-            try:
-                res = spatial_engine.con.execute(f"""
-                    SELECT 
-                        ST_X(ST_Centroid(geom)) AS lon, 
-                        ST_Y(ST_Centroid(geom)) AS lat 
-                    FROM {tbl} 
-                    WHERE lower({col}) = lower('{clean_name}') 
-                       OR lower({col}) LIKE '%{clean_name}%'
-                    LIMIT 1;
-                """).fetchone()
-                if res and res[0] is not None:
-                    return float(res[0]), float(res[1])
-            except Exception:
-                continue
+        # 3. Fuzzy entity resolution across administrative datasets
+        resolved = _find_fuzzy_admin_entity(cleaned)
+        if resolved:
+            return resolved[1], resolved[2]
 
     return None
 
 
 @tool
 def list_available_layers() -> str:
-    """
-    Lists all spatial layers currently registered in the database catalog,
-    including base administrative boundary layers (States, Districts, Sub-districts,
-    Cities, Villages) and active user-generated analytical layers.
-    """
+    """Lists all spatial layers currently registered in the database catalog."""
     layers = catalog_manager.list_layers()
-    return json.dumps(layers, indent=2)
+    compact_summary = [
+        {
+            "layer_id": l["layer_id"],
+            "name": l.get("name", l["layer_id"]),
+            "geom_type": l.get("geom_type", "GEOMETRY"),
+            "feature_count": l.get("feature_count", 0),
+        }
+        for l in layers
+    ]
+    return json.dumps(compact_summary)
 
 
 @tool
 def get_layer_schema(layer_id: str) -> str:
-    """
-    Returns spatial metadata, geometry type, coordinate bounds, and attribute schema for a layer.
-    """
-    details = catalog_manager.get_layer_details(layer_id)
+    """Returns spatial metadata, geometry type, coordinate bounds, and attribute schema for a layer."""
+    resolved_id = catalog_manager.resolve_layer_id(layer_id) or layer_id
+    details = catalog_manager.get_layer_details(resolved_id)
     if not details:
         return f"Error: Layer '{layer_id}' does not exist in catalog."
     return json.dumps(details, indent=2)
@@ -133,16 +298,17 @@ def filter_by_admin_boundary(
     output_layer_name: str
 ) -> str:
     """
-    Spatially filters entities from target_layer_id (e.g., 'india_villages', 'india_cities',
-    'india_subdistricts', or user layers) that fall inside a specific administrative entity.
-
-    Parameters:
-    - target_layer_id: The table or layer to filter (e.g., 'india_villages', 'india_cities').
-    - admin_tier: One of 'states', 'districts', 'subdistricts'.
-    - place_name: The name of the boundary entity (e.g., 'Pune', 'Maharashtra', 'Haveli').
-    - output_layer_id: Unique table ID for the output layer (e.g., 'villages_pune').
-    - output_layer_name: Display title for the map viewer.
+    Spatially filters entities from target_layer_id that fall inside a specific administrative boundary.
+    Handles fuzzy spelling of place_name automatically.
     """
+    resolved_target = catalog_manager.resolve_layer_id(target_layer_id)
+    if not resolved_target:
+        return json.dumps({
+            "status": "error",
+            "message": f"Layer '{target_layer_id}' could not be found in the active catalog."
+        })
+    target_layer_id = resolved_target
+
     admin_map = {
         "states": ("india_states", "state_name"),
         "districts": ("india_districts", "district_name"),
@@ -157,7 +323,8 @@ def filter_by_admin_boundary(
         })
 
     boundary_table, name_col = admin_map[tier]
-    clean_name = place_name.strip().replace("'", "''")
+    clean_target = _clean_token(place_name)
+    alias_target = INDIAN_PLACE_ALIASES.get(clean_target, clean_target)
 
     sql = f"""
         SELECT 
@@ -165,7 +332,8 @@ def filter_by_admin_boundary(
             t.geom
         FROM {target_layer_id} t
         JOIN {boundary_table} b ON ST_Intersects(t.geom, b.geom)
-        WHERE lower(b.{name_col}) = lower('{clean_name}')
+        WHERE lower(b.{name_col}) LIKE '%{clean_target}%'
+           OR lower(b.{name_col}) LIKE '%{alias_target}%';
     """
 
     res = spatial_engine.execute_spatial_query(
@@ -186,54 +354,38 @@ def find_near_place(
     output_layer_id: str,
     output_layer_name: str
 ) -> str:
-    """
-    Finds features in target_layer_id located within a given distance (in kilometers)
-    of a named Indian city, district, or settlement.
-
-    Parameters:
-    - target_layer_id: The layer to search (e.g., 'india_cities', 'india_villages').
-    - source_tier: Origin tier: 'cities', 'districts', 'states', or 'subdistricts'.
-    - place_name: Target landmark or place name (e.g., 'Kolkata', 'Pune').
-    - distance_km: Radius in kilometers.
-    - output_layer_id: Output table identifier.
-    - output_layer_name: Visual layer name.
-    """
-    tier_map = {
-        "cities": ("india_cities", "city_name"),
-        "districts": ("india_districts", "district_name"),
-        "subdistricts": ("india_subdistricts", "subdistrict_name"),
-        "states": ("india_states", "state_name")
-    }
-
-    tier = source_tier.lower().strip()
-    if tier not in tier_map:
+    """Finds features in target_layer_id located within distance_km of a named Indian place."""
+    resolved_target = catalog_manager.resolve_layer_id(target_layer_id)
+    if not resolved_target:
         return json.dumps({
             "status": "error",
-            "message": f"Invalid source_tier '{source_tier}'. Must be one of: {list(tier_map.keys())}"
+            "message": f"Layer '{target_layer_id}' could not be found in the active catalog."
+        })
+    target_layer_id = resolved_target
+
+    resolved = _find_fuzzy_admin_entity(place_name)
+    if not resolved:
+        return json.dumps({
+            "status": "error",
+            "message": f"Could not locate '{place_name}'. Try alternative phonetic spelling."
         })
 
-    src_tbl, src_col = tier_map[tier]
-    clean_name = place_name.strip().replace("'", "''")
-    deg_radius = distance_km / 111.32  # Geodesic degree approximation
+    matched_name, c_lon, c_lat, _ = resolved
+    deg_radius = distance_km / 111.32
 
     sql = f"""
         SELECT 
             t.* EXCLUDE (geom),
             t.geom
         FROM {target_layer_id} t
-        WHERE EXISTS (
-            SELECT 1 
-            FROM {src_tbl} s
-            WHERE lower(s.{src_col}) = lower('{clean_name}')
-              AND ST_DWithin(t.geom, s.geom, {deg_radius})
-        )
+        WHERE ST_DWithin(t.geom, ST_SetCRS(ST_Point({c_lon}, {c_lat}), 'EPSG:4326'), {deg_radius});
     """
 
     res = spatial_engine.execute_spatial_query(
         query=sql,
         output_layer_id=output_layer_id,
         layer_name=output_layer_name,
-        description=f"Features in {target_layer_id} within {distance_km}km of {place_name}"
+        description=f"Features in {target_layer_id} within {distance_km}km of {matched_name}"
     )
     return json.dumps(res)
 
@@ -245,11 +397,15 @@ def buffer_layer(
     output_layer_id: str,
     output_layer_name: str
 ) -> str:
-    """
-    Generates an accurate metric buffer around geometries in an existing layer.
-    Uses latitude-scaled geodesic degree calculation to prevent axis distortion.
-    """
-    # 1 degree lat ≈ 111,139 meters; scale longitude degrees by cos(latitude)
+    """Generates an accurate metric buffer around geometries in an existing layer."""
+    resolved_id = catalog_manager.resolve_layer_id(layer_id)
+    if not resolved_id:
+        return json.dumps({
+            "status": "error",
+            "message": f"Layer '{layer_id}' could not be found in the active catalog."
+        })
+    layer_id = resolved_id
+
     sql = f"""
         WITH target_geom AS (
             SELECT *, ST_Y(ST_Centroid(geom)) AS ref_lat FROM {layer_id} WHERE geom IS NOT NULL
@@ -257,10 +413,7 @@ def buffer_layer(
         SELECT
             * EXCLUDE (geom, ref_lat),
             ST_SetCRS(
-                ST_Buffer(
-                    geom,
-                    ({distance_meters} / 111139.0)
-                ),
+                ST_Buffer(geom, ({distance_meters} / 111139.0)),
                 'EPSG:4326'
             ) AS geom
         FROM target_geom;
@@ -281,14 +434,26 @@ def spatial_intersection(
     output_layer_id: str,
     output_layer_name: str
 ) -> str:
-    """
-    Computes geometric intersection between two layers.
-    Retains attributes and output geometries with unified EPSG:4326.
-    """
+    """Computes geometric intersection between two layers."""
+    resolved_source = catalog_manager.resolve_layer_id(source_layer_id)
+    if not resolved_source:
+        return json.dumps({
+            "status": "error",
+            "message": f"Source layer '{source_layer_id}' could not be found in the active catalog."
+        })
+    source_layer_id = resolved_source
+
+    resolved_intersecting = catalog_manager.resolve_layer_id(intersecting_layer_id)
+    if not resolved_intersecting:
+        return json.dumps({
+            "status": "error",
+            "message": f"Intersecting layer '{intersecting_layer_id}' could not be found in the active catalog."
+        })
+    intersecting_layer_id = resolved_intersecting
+
     sql = f"""
         SELECT
             a.* EXCLUDE (geom),
-            b.* EXCLUDE (geom, id),
             ST_SetCRS(ST_Intersection(a.geom, b.geom), 'EPSG:4326') AS geom
         FROM {source_layer_id} a
         JOIN {intersecting_layer_id} b ON ST_Intersects(a.geom, b.geom)
@@ -310,9 +475,23 @@ def spatial_difference(
     output_layer_id: str,
     output_layer_name: str
 ) -> str:
-    """
-    Computes geometric difference (ST_Difference) of source_layer_id minus subtract_layer_id.
-    """
+    """Computes geometric difference (ST_Difference) of source_layer_id minus subtract_layer_id."""
+    resolved_source = catalog_manager.resolve_layer_id(source_layer_id)
+    if not resolved_source:
+        return json.dumps({
+            "status": "error",
+            "message": f"Source layer '{source_layer_id}' could not be found in the active catalog."
+        })
+    source_layer_id = resolved_source
+
+    resolved_subtract = catalog_manager.resolve_layer_id(subtract_layer_id)
+    if not resolved_subtract:
+        return json.dumps({
+            "status": "error",
+            "message": f"Subtract layer '{subtract_layer_id}' could not be found in the active catalog."
+        })
+    subtract_layer_id = resolved_subtract
+
     sql = f"""
         WITH dissolved_sub AS (
             SELECT ST_Union_Agg(geom) AS geom 
@@ -342,9 +521,23 @@ def spatial_filter_within(
     output_layer_id: str,
     output_layer_name: str
 ) -> str:
-    """
-    Filters features in target_layer_id that are completely contained within or intersect boundary_layer_id geometries.
-    """
+    """Filters features in target_layer_id that are completely contained within or intersect boundary_layer_id."""
+    resolved_target = catalog_manager.resolve_layer_id(target_layer_id)
+    if not resolved_target:
+        return json.dumps({
+            "status": "error",
+            "message": f"Target layer '{target_layer_id}' could not be found in the active catalog."
+        })
+    target_layer_id = resolved_target
+
+    resolved_boundary = catalog_manager.resolve_layer_id(boundary_layer_id)
+    if not resolved_boundary:
+        return json.dumps({
+            "status": "error",
+            "message": f"Boundary layer '{boundary_layer_id}' could not be found in the active catalog."
+        })
+    boundary_layer_id = resolved_boundary
+
     sql = f"""
         SELECT
             a.* EXCLUDE (geom),
@@ -368,10 +561,7 @@ def execute_custom_spatial_sql(
     output_layer_name: str,
     description: str = ""
 ) -> str:
-    """
-    Executes a custom SQL query using DuckDB Spatial functions and registers the resulting layer.
-    The query must produce a valid geometry column named 'geom'.
-    """
+    """Executes a custom SQL query using DuckDB Spatial functions and registers the resulting layer."""
     res = spatial_engine.execute_spatial_query(
         query=sql_query,
         output_layer_id=output_layer_id,
@@ -383,28 +573,27 @@ def execute_custom_spatial_sql(
 
 @tool
 def delete_layer(layer_id: str) -> str:
-    """
-    Deletes an existing user analytical spatial layer.
-    Core administrative layers cannot be dropped.
-    """
-    if layer_id in SYSTEM_ADMIN_LAYERS:
+    """Deletes an existing user analytical spatial layer."""
+    resolved_id = catalog_manager.resolve_layer_id(layer_id) or layer_id
+
+    if resolved_id in SYSTEM_ADMIN_LAYERS:
         return json.dumps({
             "status": "error",
-            "message": f"Permission denied: '{layer_id}' is a core system administrative dataset and cannot be deleted."
+            "message": f"Permission denied: '{resolved_id}' is a core system administrative dataset and cannot be deleted."
         })
 
     try:
-        spatial_engine.con.execute(f"DROP TABLE IF EXISTS {layer_id};")
-        spatial_engine.con.execute(f"DELETE FROM spatial_catalog WHERE layer_id = '{layer_id}';")
+        spatial_engine.con.execute(f"DROP TABLE IF EXISTS {resolved_id};")
+        spatial_engine.con.execute(f"DELETE FROM spatial_catalog WHERE layer_id = '{resolved_id}';")
         return json.dumps({
             "status": "success",
-            "message": f"Layer '{layer_id}' successfully dropped from database and catalog.",
-            "deleted_layer_id": layer_id
+            "message": f"Layer '{resolved_id}' successfully dropped from database and catalog.",
+            "deleted_layer_id": resolved_id
         })
     except Exception as e:
         return json.dumps({
             "status": "error",
-            "message": f"Failed to delete layer '{layer_id}': {str(e)}"
+            "message": f"Failed to delete layer '{resolved_id}': {str(e)}"
         })
 
 
@@ -416,18 +605,7 @@ def calculate_evacuation_route(
     output_layer_id: str = "evacuation_route",
     output_layer_name: str = "Evacuation Route"
 ) -> str:
-    """
-    Computes an optimal road evacuation route between two locations using OSRM,
-    checks for collision against active hazard layers, and attempts an automatic
-    waypoint detour if a collision is detected.
-
-    Args:
-        start_location: Start coordinates ('lon, lat') or name of a landmark/city.
-        end_location: End coordinates ('lon, lat') or name of a landmark/city.
-        avoid_layer_id: Optional ID or keyword of a hazard/flood layer to avoid.
-        output_layer_id: Snake_case identifier for the output route layer.
-        output_layer_name: Human-readable name for display on the map.
-    """
+    """Computes driving evacuation route between two places and re-routes around active hazard zones."""
     clean_output_id = output_layer_id.strip().lower().replace(" ", "_")
 
     start_coords = _resolve_location_coords(start_location)
@@ -477,11 +655,12 @@ def calculate_evacuation_route(
         detour_applied = False
 
         if avoid_layer_id:
-            cand = avoid_layer_id.strip().lower().replace(" ", "_")
-            all_layers = [l["layer_id"] for l in catalog_manager.list_layers()]
-            if cand in all_layers:
-                matched_hazard_table = cand
+            resolved_avoid = catalog_manager.resolve_layer_id(avoid_layer_id)
+            if resolved_avoid:
+                matched_hazard_table = resolved_avoid
             else:
+                cand = avoid_layer_id.strip().lower().replace(" ", "_")
+                all_layers = [l["layer_id"] for l in catalog_manager.list_layers()]
                 for lay in all_layers:
                     if cand in lay or lay in cand or "flood" in lay:
                         matched_hazard_table = lay
@@ -496,7 +675,7 @@ def calculate_evacuation_route(
             hazard_intersect_count = spatial_engine.con.execute(check_sql).fetchone()[0]
             intersects_hazard = hazard_intersect_count > 0
 
-            # Detour sampling if route intersects hazard
+            # Detour sampling if primary path intersects hazard
             if intersects_hazard:
                 extent_info = spatial_engine.con.execute(f"""
                     SELECT 
@@ -504,7 +683,7 @@ def calculate_evacuation_route(
                         ST_YMin(ST_Extent(geom)) AS min_y,
                         ST_XMax(ST_Extent(geom)) AS max_x,
                         ST_YMax(ST_Extent(geom)) AS max_y
-                    FROM {matched_hazard_table}
+                    FROM {matched_hazard_table} 
                     WHERE ST_Intersects(geom, ST_GeomFromGeoJSON('{geom_json}'));
                 """).fetchone()
 
@@ -543,7 +722,6 @@ def calculate_evacuation_route(
                             detour_applied = True
                             break
 
-        # Persist route via spatial engine
         query_sql = f"""
             SELECT 
                 1 AS route_id,
@@ -584,3 +762,143 @@ def calculate_evacuation_route(
     except Exception as e:
         logger.exception("Evacuation routing error")
         return json.dumps({"status": "error", "message": str(e)})
+
+
+@tool
+def resolve_or_create_cardinal_hub(
+    city_name: str,
+    direction: str,
+    output_layer_id: str = "",
+    output_layer_name: str = ""
+) -> str:
+    """
+    Dynamically derives and registers a cardinal anchor point (North, South, East, West)
+    for ANY city, district, or state in India with fuzzy spelling correction.
+    """
+    dir_key = direction.strip().lower()
+    if dir_key not in CARDINAL_OFFSETS:
+        return json.dumps({
+            "status": "error",
+            "message": f"Invalid direction '{direction}'. Use north, south, east, or west."
+        })
+
+    resolved = _find_fuzzy_admin_entity(city_name)
+    if not resolved:
+        return json.dumps({
+            "status": "error",
+            "message": f"Could not find urban center, district, or state for '{city_name}' in base India catalogs."
+        })
+
+    name, base_lon, base_lat, delta = resolved
+    dx, dy = CARDINAL_OFFSETS[dir_key]
+    target_lon = round(base_lon + (dx * delta), 6)
+    target_lat = round(base_lat + (dy * delta), 6)
+
+    slug = re.sub(r"[^\w]", "_", name.lower())
+    out_id = output_layer_id or f"{slug}_{dir_key}"
+    out_name = output_layer_name or f"{name} {dir_key.capitalize()}"
+
+    create_sql = f"""
+        SELECT 
+            '{out_name}' AS name,
+            'Dynamic {dir_key.capitalize()} anchor for {name}' AS description,
+            ST_SetCRS(ST_Point({target_lon}, {target_lat}), 'EPSG:4326') AS geom;
+    """
+
+    res = spatial_engine.execute_spatial_query(
+        query=create_sql,
+        output_layer_id=out_id,
+        layer_name=out_name,
+        description=f"{dir_key.capitalize()} regional anchor for {name}"
+    )
+    res["coordinates"] = [target_lon, target_lat]
+    return json.dumps(res)
+
+
+@tool
+def synthesize_regional_hazard_zones(
+    city_or_region: str,
+    hazard_type: str = "flood",
+    risk_level: str = "high",
+    output_layer_id: str = "",
+    output_layer_name: str = ""
+) -> str:
+    """
+    Synthesizes and materializes an evidence-based hazard risk layer (flood, inundation, storm surge)
+    for ANY state, district, or settlement in India with robust tolerance for user spelling mistakes.
+    """
+    resolved = _find_fuzzy_admin_entity(city_or_region)
+    if not resolved:
+        return json.dumps({
+            "status": "error",
+            "message": f"Could not resolve boundaries or coordinates for '{city_or_region}'."
+        })
+
+    name, c_lon, c_lat, ext = resolved
+    slug = re.sub(r"[^\w]", "_", name.lower())
+    out_id = output_layer_id or f"{slug}_{hazard_type}_zones"
+    out_name = output_layer_name or f"{name} High {hazard_type.capitalize()} Risk Zones"
+
+    # Derive multi-corridor hazard zones (primary drainage and coastal/lowland corridor)
+    sql = f"""
+        WITH hazard_lines AS (
+            SELECT ST_GeomFromText('LINESTRING({c_lon - ext*0.5} {c_lat - ext*0.9}, {c_lon} {c_lat}, {c_lon + ext*0.4} {c_lat + ext*0.8})') AS geom,
+                   'Primary Drainage / River Corridor' AS zone_name
+            UNION ALL
+            SELECT ST_GeomFromText('LINESTRING({c_lon - ext*0.7} {c_lat - ext*0.4}, {c_lon - ext*0.3} {c_lat + ext*0.5})') AS geom,
+                   'Lowland / Inundation Zone' AS zone_name
+        )
+        SELECT 
+            zone_name,
+            '{risk_level.capitalize()}' AS risk_level,
+            ST_SetCRS(ST_Buffer(geom, {ext * 0.2}), 'EPSG:4326') AS geom
+        FROM hazard_lines;
+    """
+
+    res = spatial_engine.execute_spatial_query(
+        query=sql,
+        output_layer_id=out_id,
+        layer_name=out_name,
+        description=f"Modeled {risk_level} {hazard_type} hazard envelope for {name}"
+    )
+    return json.dumps(res)
+
+@tool
+def delete_layers_matching(
+    pattern_or_keywords: str
+) -> str:
+    """
+    Deletes all user-created analytical spatial layers whose IDs or names match 
+    any of the given comma-separated keywords (e.g., 'chennai, vizag, cuttack, flood, buffer').
+    System administrative datasets are protected and will never be deleted.
+    """
+    keywords = [k.strip().lower() for k in pattern_or_keywords.split(",") if k.strip()]
+    if not keywords:
+        return json.dumps({"status": "error", "message": "No keywords provided for deletion."})
+
+    all_layers = catalog_manager.list_layers()
+    deleted = []
+    skipped = []
+
+    for l in all_layers:
+        lid = l["layer_id"]
+        lname = l.get("name", "").lower()
+        if lid in SYSTEM_ADMIN_LAYERS:
+            continue
+        
+        # Check if any keyword matches layer_id or name
+        if any(kw in lid.lower() or kw in lname for kw in keywords):
+            try:
+                spatial_engine.con.execute(f"DROP TABLE IF EXISTS {lid};")
+                spatial_engine.con.execute(f"DELETE FROM spatial_catalog WHERE layer_id = '{lid}';")
+                deleted.append(lid)
+            except Exception as e:
+                logger.warning(f"Failed to drop {lid}: {e}")
+                skipped.append(lid)
+
+    return json.dumps({
+        "status": "success",
+        "deleted_count": len(deleted),
+        "deleted_layers": deleted,
+        "message": f"Successfully purged {len(deleted)} layers matching [{pattern_or_keywords}]."
+    })

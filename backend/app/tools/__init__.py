@@ -6,7 +6,10 @@ from backend.app.tools.spatial_ops import (
     spatial_difference,
     spatial_filter_within,
     delete_layer,
+    delete_layers_matching,
     calculate_evacuation_route,
+    resolve_or_create_cardinal_hub,
+    synthesize_regional_hazard_zones,
 )
 from backend.app.tools.sql_runner import run_spatial_sql
 
@@ -18,7 +21,10 @@ ALL_SPATIAL_TOOLS = [
     spatial_difference,
     spatial_filter_within,
     delete_layer,
+    delete_layers_matching,
     calculate_evacuation_route,
+    resolve_or_create_cardinal_hub,
+    synthesize_regional_hazard_zones,
     run_spatial_sql,
 ]
 
@@ -31,6 +37,9 @@ __all__ = [
     "spatial_difference",
     "spatial_filter_within",
     "delete_layer",
+    "delete_layers_matching",
     "calculate_evacuation_route",
+    "resolve_or_create_cardinal_hub",
+    "synthesize_regional_hazard_zones",
     "run_spatial_sql",
 ]

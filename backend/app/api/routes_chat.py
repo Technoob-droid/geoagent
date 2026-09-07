@@ -108,21 +108,31 @@ async def stream_agent_chat(request: ChatRequest):
                     }
                     yield f"data: {json.dumps(payload)}\n\n"
 
-                    # Trigger client map to add new layer
-                    if isinstance(output_data, dict) and output_data.get("status") == "success" and "layer_id" in output_data:
-                        layer_event = {
-                            "type": "new_layer",
-                            "layer": output_data
-                        }
-                        yield f"data: {json.dumps(layer_event)}\n\n"
+                    if isinstance(output_data, dict) and output_data.get("status") == "success":
+                        # Trigger client map to add new layer
+                        if "layer_id" in output_data:
+                            layer_event = {
+                                "type": "new_layer",
+                                "layer": output_data
+                            }
+                            yield f"data: {json.dumps(layer_event)}\n\n"
 
-                    # Trigger client map to remove layer
-                    elif isinstance(output_data, dict) and output_data.get("status") == "success" and "deleted_layer_id" in output_data:
-                        layer_event = {
-                            "type": "delete_layer",
-                            "layer_id": output_data["deleted_layer_id"]
-                        }
-                        yield f"data: {json.dumps(layer_event)}\n\n"
+                        # Trigger client map to remove single layer
+                        if "deleted_layer_id" in output_data:
+                            layer_event = {
+                                "type": "delete_layer",
+                                "layer_id": output_data["deleted_layer_id"]
+                            }
+                            yield f"data: {json.dumps(layer_event)}\n\n"
+
+                        # Trigger client map to remove multiple layers from bulk delete
+                        if "deleted_layers" in output_data and isinstance(output_data["deleted_layers"], list):
+                            # Emit bulk delete event
+                            yield f"data: {json.dumps({'type': 'delete_layers', 'layer_ids': output_data['deleted_layers']})}\n\n"
+
+                            # Also emit individual delete events for frontend clients that only handle single deletions
+                            for del_id in output_data["deleted_layers"]:
+                                yield f"data: {json.dumps({'type': 'delete_layer', 'layer_id': del_id})}\n\n"
 
         except Exception as e:
             logger.error(f"Error during agent execution stream: {e}", exc_info=True)

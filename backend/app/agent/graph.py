@@ -27,34 +27,71 @@ if not groq_key:
 
 logger.info(f"Initialized ChatGroq with key prefix: {groq_key[:7] if groq_key else 'MISSING'}")
 
-# Bind spatial tools to Groq model
+# Production function-calling model configuration
 llm = ChatGroq(
-    model="openai/gpt-oss-20b",
+    model="openai/gpt-oss-120b",
     temperature=0,
+    max_tokens=1000,
     groq_api_key=groq_key,
 ).bind_tools(ALL_SPATIAL_TOOLS)
 
 
 async def agent_node(state: AgentState) -> dict:
-    """Evaluates conversation and invokes spatial tools with a tight 4-message window."""
+    """
+    Evaluates conversation and invokes spatial tools while preserving original user intent,
+    providing ample tool response window, and halting consecutive duplicate loops with
+    a user-facing synthesized message.
+    """
     sys_prompt = get_system_prompt()
-
-    # Limit message history to the last 4 messages to stay safely below the 8,000 TPM limit
     raw_messages = list(state["messages"])
-    recent_messages = raw_messages[-4:] if len(raw_messages) > 4 else raw_messages
 
-    # Trim leading orphaned ToolMessages if history was sliced mid-tool-call
-    while recent_messages and isinstance(recent_messages[0], ToolMessage):
-        recent_messages = recent_messages[1:]
+    # Extract the original user prompt to guarantee intent is never lost across hops
+    first_user_msg = next((m for m in raw_messages if getattr(m, "type", "") == "human"), None)
+    tail_messages = raw_messages[-4:] if len(raw_messages) > 4 else raw_messages
 
-    messages = [SystemMessage(content=sys_prompt)] + recent_messages
+    active_dialogue = []
+    if first_user_msg and first_user_msg not in tail_messages:
+        active_dialogue.append(first_user_msg)
 
+    # Permit larger payload window (up to 2000 chars) so layer lists aren't severed mid-JSON
+    for msg in tail_messages:
+        if isinstance(msg, ToolMessage):
+            content_str = str(msg.content)
+            if len(content_str) > 2000:
+                content_str = content_str[:2000] + "... [truncated]"
+            active_dialogue.append(ToolMessage(content=content_str, tool_call_id=msg.tool_call_id))
+        else:
+            active_dialogue.append(msg)
+
+    messages = [SystemMessage(content=sys_prompt)] + active_dialogue
     response = await llm.ainvoke(messages)
+
+    tool_calls = getattr(response, "tool_calls", [])
+
+    # Circuit breaker: detect identical consecutive tool call loops
+    if tool_calls and len(tail_messages) >= 2:
+        last_tool_msg = tail_messages[-1]
+        prev_ai_msg = tail_messages[-2]
+        if isinstance(last_tool_msg, ToolMessage) and getattr(prev_ai_msg, "tool_calls", None):
+            prev_calls = prev_ai_msg.tool_calls
+            if (
+                prev_calls
+                and prev_calls[0].get("name") == tool_calls[0].get("name")
+                and prev_calls[0].get("args") == tool_calls[0].get("args")
+            ):
+                logger.warning(f"Detected duplicate tool call loop for '{tool_calls[0].get('name')}'. Halting recursion.")
+                response.tool_calls = []
+                if not response.content:
+                    response.content = "Catalog check complete. Please specify which layers you would like to inspect or modify."
+
+    logger.info(f"Groq raw content: {repr(response.content)}")
+    logger.info(f"Groq tool calls detected: {getattr(response, 'tool_calls', [])}")
+
     return {"messages": [response]}
 
 
 def post_tool_evaluator(state: AgentState) -> dict:
-    """Inspects tool messages to record generated/deleted layers and detect runtime errors."""
+    """Inspects tool messages to record generated/deleted layers and track bulk changes."""
     messages = state["messages"]
     new_layers = list(state.get("new_layers") or [])
     deleted_layers = list(state.get("deleted_layers") or [])
@@ -65,17 +102,23 @@ def post_tool_evaluator(state: AgentState) -> dict:
             try:
                 payload = json.loads(msg.content)
                 if isinstance(payload, dict):
-                    # Layer creation success
+                    # Single layer creation success
                     if payload.get("status") == "success" and "layer_id" in payload:
                         if not any(l["layer_id"] == payload["layer_id"] for l in new_layers):
                             new_layers.append(payload)
-                    # Layer deletion success
-                    elif payload.get("status") == "success" and "deleted_layer_id" in payload:
-                        del_id = payload["deleted_layer_id"]
-                        if del_id not in deleted_layers:
-                            deleted_layers.append(del_id)
-                        new_layers = [l for l in new_layers if l.get("layer_id") != del_id]
-                    # Error detection and logging
+
+                    # Bulk or single layer deletion success
+                    elif payload.get("status") == "success" and ("deleted_layer_id" in payload or "deleted_layers" in payload):
+                        del_ids = list(payload.get("deleted_layers", []))
+                        if "deleted_layer_id" in payload:
+                            del_ids.append(payload["deleted_layer_id"])
+
+                        for del_id in del_ids:
+                            if del_id not in deleted_layers:
+                                deleted_layers.append(del_id)
+                            new_layers = [l for l in new_layers if l.get("layer_id") != del_id]
+
+                    # Error handling
                     elif payload.get("status") == "error":
                         error_count += 1
                         logger.error(f"Tool execution returned error: {payload.get('message')}")
@@ -94,6 +137,20 @@ def post_tool_evaluator(state: AgentState) -> dict:
 def route_after_agent(state: AgentState) -> Literal["tools", "__end__"]:
     """Determines whether the agent needs tool execution or can answer directly."""
     last_msg = state["messages"][-1]
+
+    # Terminate immediately once an evacuation route or bulk purge has run
+    for msg in reversed(state["messages"]):
+        if isinstance(msg, ToolMessage):
+            try:
+                payload = json.loads(msg.content)
+                if payload.get("status") == "success":
+                    if "evac" in payload.get("layer_id", "") or "deleted_layers" in payload:
+                        return END
+            except Exception:
+                pass
+        else:
+            break
+
     if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
         return "tools"
     return END
@@ -101,7 +158,7 @@ def route_after_agent(state: AgentState) -> Literal["tools", "__end__"]:
 
 def route_after_tools(state: AgentState) -> Literal["agent", "__end__"]:
     """Prevents runaway loops if errors repeat."""
-    if state.get("error_count", 0) > 3:
+    if state.get("error_count", 0) > 2:
         logger.warning("Max error threshold exceeded in agent cycle.")
         return END
     return "agent"

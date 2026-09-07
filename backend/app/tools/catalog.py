@@ -1,5 +1,6 @@
 import json
 import logging
+import difflib
 from typing import List, Dict, Any, Optional
 from backend.app.tools.engine import spatial_engine
 
@@ -119,6 +120,54 @@ class CatalogManager:
                 }
         except Exception as e:
             logger.error(f"Error fetching details for layer '{layer_id}': {e}")
+
+        return None
+
+    def resolve_layer_id(self, input_name: str) -> Optional[str]:
+        """
+        Resolves an input layer name or ID to an exact existing layer_id.
+        Matches exact names/slugs, checks token set containment, and uses a strict
+        0.80 cutoff for difflib to prevent unrelated prefix hijacking.
+        """
+        if not input_name:
+            return None
+
+        clean_input = input_name.strip().strip("'\"`").lower()
+        slug_input = clean_input.replace(" ", "_").replace("-", "_")
+
+        all_layers = self.list_layers()
+        if not all_layers:
+            return None
+
+        # 1. Exact match against layer_id, display name, or slug
+        for layer in all_layers:
+            lid = layer["layer_id"].lower()
+            lname = layer.get("name", "").lower()
+            if clean_input in (lid, lname) or slug_input == lid:
+                return layer["layer_id"]
+
+        # 2. Token set containment
+        input_tokens = set(clean_input.replace("_", " ").split())
+        for layer in all_layers:
+            lid_tokens = set(layer["layer_id"].lower().replace("_", " ").split())
+            lname_tokens = set(layer.get("name", "").lower().replace("_", " ").split())
+            if input_tokens == lid_tokens or (lname_tokens and input_tokens == lname_tokens):
+                return layer["layer_id"]
+
+        # 3. Fuzzy match candidates with strict 0.80 cutoff
+        candidates = {}
+        for layer in all_layers:
+            candidates[layer["layer_id"].lower()] = layer["layer_id"]
+            if layer.get("name"):
+                candidates[layer["name"].lower()] = layer["layer_id"]
+
+        matches = difflib.get_close_matches(clean_input, candidates.keys(), n=1, cutoff=0.80)
+        if matches:
+            return candidates[matches[0]]
+
+        slug_matches = difflib.get_close_matches(slug_input, candidates.keys(), n=1, cutoff=0.80)
+        if slug_matches:
+            return candidates[slug_matches[0]]
 
         return None
 
