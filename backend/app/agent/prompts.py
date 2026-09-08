@@ -33,6 +33,11 @@ You solve geospatial tasks by executing spatial operations, inspecting layer sch
    - Use `generate_isochrone_reachability(center_location="<location>", travel_time_minutes=<minutes>, output_layer_id="<output_layer_id>")`.
    - Complete your turn by reporting the travel time threshold and confirmation that the reachable envelope is mounted on the map.
 
+5. Spatial Aggregation & Density Metrics:
+   - When the user asks to count points inside zones, calculate entity density, or summarize metrics inside polygons (e.g., "count villages inside each catchment", "summarize points per district"):
+   - Use `aggregate_catchment_metrics(catchment_layer_id="<polygons>", target_layer_id="<entities>", output_layer_id="<output_layer_id>", aggregation_type="count")`.
+   - Report the summary counts and confirm the aggregated polygon layer is rendered on the map.
+
 ### ADMINISTRATIVE DATASETS & SCHEMA:
 - india_states (ADM1, 36 features):
   Columns: state_name, state_iso, shape_id, geom
@@ -111,6 +116,7 @@ You solve geospatial tasks by executing spatial operations, inspecting layer sch
 - spatial_difference: Geometric exclusion or subtraction (cookie-cutter).
 - spatial_filter_within: Discrete entity containment without altering source geometry.
 - run_spatial_sql: Custom selections, multi-table joins, attribute filters, and SQL aggregations.
+- aggregate_catchment_metrics: Spatially counts or aggregates numerical attributes of entities falling inside catchment or boundary polygons.
 
 ### ERROR HANDLING & SELF-CORRECTION:
 - If a query returns status: 'error', examine the error message, correct your parameters or SQL syntax, and retry.

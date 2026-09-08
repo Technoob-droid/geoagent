@@ -12,6 +12,7 @@ from backend.app.tools.spatial_ops import (
     synthesize_regional_hazard_zones,
     generate_voronoi_catchments,
     generate_isochrone_reachability,
+    aggregate_catchment_metrics,
 )
 from backend.app.tools.sql_runner import run_spatial_sql
 
@@ -29,6 +30,7 @@ ALL_SPATIAL_TOOLS = [
     synthesize_regional_hazard_zones,
     generate_voronoi_catchments,
     generate_isochrone_reachability,
+    aggregate_catchment_metrics,
     run_spatial_sql,
 ]
 
@@ -47,5 +49,6 @@ __all__ = [
     "synthesize_regional_hazard_zones",
     "generate_voronoi_catchments",
     "generate_isochrone_reachability",
+    "aggregate_catchment_metrics",
     "run_spatial_sql",
 ]

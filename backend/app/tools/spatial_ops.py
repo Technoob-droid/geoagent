@@ -1172,3 +1172,81 @@ def generate_isochrone_reachability(
         except Exception:
             pass
         return json.dumps({"status": "error", "message": f"Failed to persist isochrone layer: {str(e)}"})
+
+
+@tool
+def aggregate_catchment_metrics(
+    catchment_layer_id: str,
+    target_layer_id: str,
+    output_layer_id: str = "",
+    output_layer_name: str = "",
+    metric_column: Optional[str] = None,
+    aggregation_type: str = "count"
+) -> str:
+    """
+    Spatially aggregates points or features from target_layer_id falling inside each polygon 
+    of catchment_layer_id (Voronoi partitions, isochrones, or districts).
+    
+    Args:
+        catchment_layer_id: The polygon layer defining boundary zones.
+        target_layer_id: The layer to summarize within each polygon.
+        output_layer_id: Unique ID for the resulting polygon layer with metric attributes.
+        output_layer_name: User-facing name for the map layer.
+        metric_column: Optional numeric attribute to aggregate (e.g., 'population', 'risk_score').
+        aggregation_type: Type of aggregation: 'count', 'sum', 'avg', 'min', or 'max' (default: 'count').
+    """
+    resolved_catchment = catalog_manager.resolve_layer_id(catchment_layer_id)
+    if not resolved_catchment:
+        return json.dumps({
+            "status": "error",
+            "message": f"Catchment layer '{catchment_layer_id}' could not be found in catalog."
+        })
+
+    resolved_target = catalog_manager.resolve_layer_id(target_layer_id)
+    if not resolved_target:
+        return json.dumps({
+            "status": "error",
+            "message": f"Target layer '{target_layer_id}' could not be found in catalog."
+        })
+
+    clean_out_id = output_layer_id.strip().lower().replace(" ", "_") if output_layer_id else f"{resolved_catchment}_agg_{resolved_target}"
+    clean_out_name = output_layer_name or f"{resolved_catchment} Aggregated with {resolved_target}"
+
+    # Determine numeric aggregate expression
+    agg_op = aggregation_type.strip().lower()
+    agg_select = "count(t.geom) AS feature_count"
+    
+    if metric_column and agg_op in {"sum", "avg", "min", "max"}:
+        agg_select += f", coalesce({agg_op.upper()}(try_cast(t.{metric_column} AS DOUBLE)), 0) AS metric_{agg_op}"
+
+    sql_aggregate = f"""
+        WITH target_matches AS (
+            SELECT 
+                c.rowid AS c_rid,
+                {agg_select}
+            FROM {resolved_catchment} c
+            LEFT JOIN {resolved_target} t 
+                ON ST_Intersects(c.geom, t.geom)
+            GROUP BY c.rowid
+        )
+        SELECT 
+            c.*,
+            coalesce(m.feature_count, 0) AS feature_count
+            {f", m.metric_{agg_op}" if metric_column and agg_op in {"sum", "avg", "min", "max"} else ""}
+        FROM {resolved_catchment} c
+        LEFT JOIN target_matches m 
+            ON c.rowid = m.c_rid;
+    """
+
+    res = spatial_engine.execute_spatial_query(
+        query=sql_aggregate,
+        output_layer_id=clean_out_id,
+        layer_name=clean_out_name,
+        description=f"Aggregation of {resolved_target} inside {resolved_catchment} (metric: {agg_op})"
+    )
+
+    res["message"] = (
+        f"Aggregated {resolved_target} into '{clean_out_id}' "
+        f"with {agg_op.upper()} metric attached to catchment polygons."
+    )
+    return json.dumps(res)
