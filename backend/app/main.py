@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from backend.app.config import settings
 from backend.app.api.routes_layers import router as layers_router
 from backend.app.api.routes_chat import router as chat_router
+from backend.app.api.routes_export import router as export_router
 
 logging.basicConfig(
     level=logging.INFO if settings.DEBUG else logging.WARNING,
@@ -37,6 +38,7 @@ app.add_middleware(
 # Mount endpoints
 app.include_router(layers_router)
 app.include_router(chat_router)
+app.include_router(export_router)
 
 @app.get("/health")
 async def health_check():
