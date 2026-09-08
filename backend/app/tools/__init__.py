@@ -10,6 +10,7 @@ from backend.app.tools.spatial_ops import (
     calculate_evacuation_route,
     resolve_or_create_cardinal_hub,
     synthesize_regional_hazard_zones,
+    generate_voronoi_catchments,
 )
 from backend.app.tools.sql_runner import run_spatial_sql
 
@@ -25,6 +26,7 @@ ALL_SPATIAL_TOOLS = [
     calculate_evacuation_route,
     resolve_or_create_cardinal_hub,
     synthesize_regional_hazard_zones,
+    generate_voronoi_catchments,
     run_spatial_sql,
 ]
 
@@ -41,5 +43,6 @@ __all__ = [
     "calculate_evacuation_route",
     "resolve_or_create_cardinal_hub",
     "synthesize_regional_hazard_zones",
+    "generate_voronoi_catchments",
     "run_spatial_sql",
 ]

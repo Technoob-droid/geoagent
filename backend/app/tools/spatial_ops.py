@@ -2,11 +2,14 @@ import json
 import logging
 import re
 import difflib
+from shapely.geometry import MultiPoint, Polygon, MultiPolygon, GeometryCollection, mapping, shape
+from shapely.ops import voronoi_diagram
 from typing import Optional, Tuple
 import httpx
 from langchain_core.tools import tool
 from backend.app.tools.engine import spatial_engine
 from backend.app.tools.catalog import catalog_manager
+
 
 logger = logging.getLogger("geoagent.tools")
 
@@ -863,6 +866,7 @@ def synthesize_regional_hazard_zones(
     )
     return json.dumps(res)
 
+
 @tool
 def delete_layers_matching(
     pattern_or_keywords: str
@@ -902,3 +906,149 @@ def delete_layers_matching(
         "deleted_layers": deleted,
         "message": f"Successfully purged {len(deleted)} layers matching [{pattern_or_keywords}]."
     })
+
+
+@tool
+def generate_voronoi_catchments(
+    input_layer_id: str,
+    output_layer_id: str,
+    clip_to_layer_id: Optional[str] = None
+) -> str:
+    """
+    Generates Voronoi (Thiessen) catchment polygons around a point layer.
+    Useful for service area delineation (e.g., hospital catchment areas, relief centers).
+
+    Args:
+        input_layer_id: ID of the point layer containing seed sites.
+        output_layer_id: Unique ID for the resulting polygon catchment layer.
+        clip_to_layer_id: Optional polygon layer ID to clip Voronoi boundaries (e.g., a district or state boundary).
+    """
+    clean_out_id = _clean_token(output_layer_id).replace(" ", "_")
+    clean_in_id = _clean_token(input_layer_id).replace(" ", "_")
+
+    # 1. Fetch points from input layer
+    try:
+        resolved_in_id = catalog_manager.resolve_layer_id(clean_in_id) or clean_in_id
+        query_pts = f"SELECT ST_AsGeoJSON(geom) as gj, * EXCLUDE(geom) FROM {resolved_in_id} WHERE geom IS NOT NULL;"
+        df_pts = spatial_engine.con.execute(query_pts).df()
+    except Exception as e:
+        return json.dumps({"status": "error", "message": f"Error reading input layer '{input_layer_id}': {str(e)}"})
+
+    if df_pts.empty:
+        return json.dumps({"status": "error", "message": f"Input layer '{input_layer_id}' contains no features."})
+
+    shapely_pts = []
+    properties_list = []
+    for _, row in df_pts.iterrows():
+        try:
+            g = shape(json.loads(row['gj']))
+            if g.geom_type == 'Point':
+                shapely_pts.append(g)
+                props = row.drop(labels=['gj']).to_dict()
+                clean_props = {k: (v if isinstance(v, (int, float, str, bool)) else str(v)) for k, v in props.items()}
+                properties_list.append(clean_props)
+        except Exception:
+            continue
+
+    if len(shapely_pts) < 2:
+        return json.dumps({"status": "error", "message": f"Voronoi partitioning requires at least 2 points. Found {len(shapely_pts)}."})
+
+    # 2. Compute Voronoi diagrams via Shapely
+    multi_pt = MultiPoint(shapely_pts)
+    env = multi_pt.envelope.buffer(0.2)
+    voronoi_collection = voronoi_diagram(multi_pt, envelope=env)
+
+    # 3. Optional clipping geometry
+    clip_geom = None
+    if clip_to_layer_id:
+        try:
+            clean_clip = _clean_token(clip_to_layer_id).replace(" ", "_")
+            resolved_clip = catalog_manager.resolve_layer_id(clean_clip) or clean_clip
+            clip_q = f"SELECT ST_AsGeoJSON(ST_Union_Agg(geom)) as gj FROM {resolved_clip} WHERE geom IS NOT NULL;"
+            clip_res = spatial_engine.con.execute(clip_q).fetchone()
+            if clip_res and clip_res[0]:
+                clip_geom = shape(json.loads(clip_res[0]))
+        except Exception as e:
+            logger.warning(f"Could not load clip boundary '{clip_to_layer_id}': {e}")
+
+    # 4. Associate each Voronoi cell with its corresponding input seed point
+    features = []
+    candidate_geoms = voronoi_collection.geoms if hasattr(voronoi_collection, 'geoms') else [voronoi_collection]
+
+    for geom in candidate_geoms:
+        poly_list = []
+        if clip_geom and clip_geom.is_valid:
+            clipped = geom.intersection(clip_geom)
+            if clipped.is_empty:
+                continue
+            if isinstance(clipped, (Polygon, MultiPolygon)):
+                poly_list = [clipped] if isinstance(clipped, Polygon) else list(clipped.geoms)
+        else:
+            if isinstance(geom, Polygon):
+                poly_list = [geom]
+
+        for p in poly_list:
+            if p.is_empty:
+                continue
+
+            matched_props = {"cell_id": len(features) + 1}
+            for idx, pt in enumerate(shapely_pts):
+                if p.contains(pt) or p.touches(pt):
+                    matched_props.update(properties_list[idx])
+                    break
+
+            features.append({
+                "type": "Feature",
+                "geometry": mapping(p),
+                "properties": matched_props
+            })
+
+    if not features:
+        return json.dumps({"status": "error", "message": "No valid Voronoi catchment polygons generated after boundary clipping."})
+
+    # 5. Build DataFrame, register temporary view, and materialize via spatial_engine wrapper
+    try:
+        import pandas as pd
+
+        records = []
+        for feat in features:
+            poly_geom = shape(feat["geometry"])
+            row = dict(feat["properties"])
+            row["wkt_geom"] = poly_geom.wkt
+            records.append(row)
+
+        df_out = pd.DataFrame(records)
+
+        # Register dataframe view
+        spatial_engine.con.register("temp_voronoi_view", df_out)
+
+        # Materialize through spatial_engine's native query pipeline to handle catalog registration automatically
+        materialize_sql = """
+            SELECT 
+                * EXCLUDE(wkt_geom),
+                ST_SetCRS(ST_GeomFromText(wkt_geom), 'EPSG:4326') AS geom
+            FROM temp_voronoi_view;
+        """
+
+        res = spatial_engine.execute_spatial_query(
+            query=materialize_sql,
+            output_layer_id=clean_out_id,
+            layer_name=clean_out_id.replace('_', ' ').title(),
+            description=f"Voronoi (Thiessen) catchment partitions derived from {clean_in_id}"
+        )
+
+        try:
+            spatial_engine.con.unregister("temp_voronoi_view")
+        except Exception:
+            pass
+
+        res["message"] = f"Successfully generated Voronoi catchment layer '{clean_out_id}' with {len(features)} partitions."
+        return json.dumps(res)
+
+    except Exception as e:
+        logger.exception("Failed to write Voronoi layer to DuckDB")
+        try:
+            spatial_engine.con.unregister("temp_voronoi_view")
+        except Exception:
+            pass
+        return json.dumps({"status": "error", "message": f"Failed to persist Voronoi layer: {str(e)}"})
