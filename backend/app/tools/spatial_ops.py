@@ -1,8 +1,9 @@
 import json
 import logging
+import math
 import re
 import difflib
-from shapely.geometry import MultiPoint, Polygon, MultiPolygon, GeometryCollection, mapping, shape
+from shapely.geometry import Point, MultiPoint, Polygon, MultiPolygon, GeometryCollection, mapping, shape
 from shapely.ops import voronoi_diagram
 from typing import Optional, Tuple
 import httpx
@@ -1052,3 +1053,122 @@ def generate_voronoi_catchments(
         except Exception:
             pass
         return json.dumps({"status": "error", "message": f"Failed to persist Voronoi layer: {str(e)}"})
+
+
+@tool
+def generate_isochrone_reachability(
+    center_location: str,
+    travel_time_minutes: float = 15.0,
+    output_layer_id: str = "",
+    output_layer_name: str = ""
+) -> str:
+    """
+    Generates a reachable travel time isochrone polygon (catchment area) around a location
+    using OSRM road network matrix calculations.
+
+    Args:
+        center_location: Name of city/district, coordinates ("lon, lat"), or a point layer ID.
+        travel_time_minutes: Maximum driving travel time cutoff in minutes (default: 15).
+        output_layer_id: Unique ID for the resulting polygon layer.
+        output_layer_name: Human-readable name for the map layer.
+    """
+    coords = _resolve_location_coords(center_location)
+    if not coords:
+        return json.dumps({
+            "status": "error",
+            "message": f"Could not resolve center location '{center_location}' to valid coordinates."
+        })
+
+    c_lon, c_lat = coords
+    max_duration_sec = travel_time_minutes * 60.0
+
+    # 1. Project radial candidate waypoints around the center (16 bearings at 4 distance tiers)
+    est_max_dist_km = (travel_time_minutes / 60.0) * 45.0
+    deg_radius = est_max_dist_km / 111.32
+
+    bearings = [i * (360.0 / 16.0) for i in range(16)]
+    distance_ratios = [0.4, 0.75, 1.0, 1.25]
+
+    probe_coords = []
+    for dist_ratio in distance_ratios:
+        r = deg_radius * dist_ratio
+        for b in bearings:
+            rad = math.radians(b)
+            dx = (r * math.sin(rad)) / math.cos(math.radians(c_lat))
+            dy = r * math.cos(rad)
+            probe_coords.append((round(c_lon + dx, 6), round(c_lat + dy, 6)))
+
+    # 2. Query OSRM Table Service (1 origin -> many destinations)
+    coord_payload = f"{c_lon},{c_lat};" + ";".join(f"{lon},{lat}" for lon, lat in probe_coords)
+    osrm_url = f"https://router.project-osrm.org/table/v1/driving/{coord_payload}?sources=0"
+
+    reachable_points = [Point(c_lon, c_lat)]
+    try:
+        with httpx.Client(timeout=15.0) as client:
+            resp = client.get(osrm_url)
+            if resp.status_code == 200:
+                matrix_data = resp.json()
+                durations = matrix_data.get("durations", [[]])[0][1:]
+                for idx, duration in enumerate(durations):
+                    if duration is not None and duration <= max_duration_sec:
+                        p_lon, p_lat = probe_coords[idx]
+                        reachable_points.append(Point(p_lon, p_lat))
+    except Exception as e:
+        logger.warning(f"OSRM Table Matrix query failed, falling back to network estimate: {e}")
+
+    # Fallback to buffer envelope if OSRM service is unreachable or sparse
+    if len(reachable_points) < 4:
+        hull_geom = Point(c_lon, c_lat).buffer(deg_radius * 0.75)
+    else:
+        mp = MultiPoint(reachable_points)
+        hull_geom = mp.convex_hull.buffer(deg_radius * 0.12)
+
+    # 3. Clean IDs and register into DuckDB via spatial_engine wrapper
+    slug_name = _clean_token(center_location).replace(" ", "_") if isinstance(center_location, str) else "hub"
+    clean_out_id = output_layer_id or f"{slug_name}_{int(travel_time_minutes)}min_isochrone"
+    clean_out_name = output_layer_name or f"{center_location} {int(travel_time_minutes)}-Min Reachability"
+
+    try:
+        import pandas as pd
+
+        row = {
+            "center": str(center_location),
+            "travel_time_minutes": float(travel_time_minutes),
+            "reachable_probes": len(reachable_points),
+            "wkt_geom": hull_geom.wkt
+        }
+        df_out = pd.DataFrame([row])
+
+        spatial_engine.con.register("temp_iso_view", df_out)
+        materialize_sql = """
+            SELECT 
+                * EXCLUDE(wkt_geom),
+                ST_SetCRS(ST_GeomFromText(wkt_geom), 'EPSG:4326') AS geom
+            FROM temp_iso_view;
+        """
+
+        res = spatial_engine.execute_spatial_query(
+            query=materialize_sql,
+            output_layer_id=clean_out_id,
+            layer_name=clean_out_name,
+            description=f"{travel_time_minutes}-minute driving isochrone envelope around {center_location}"
+        )
+
+        try:
+            spatial_engine.con.unregister("temp_iso_view")
+        except Exception:
+            pass
+
+        res["message"] = (
+            f"Materialized {travel_time_minutes}-minute driving isochrone for '{center_location}' "
+            f"as layer '{clean_out_id}'."
+        )
+        return json.dumps(res)
+
+    except Exception as e:
+        logger.exception("Failed to materialize isochrone layer")
+        try:
+            spatial_engine.con.unregister("temp_iso_view")
+        except Exception:
+            pass
+        return json.dumps({"status": "error", "message": f"Failed to persist isochrone layer: {str(e)}"})

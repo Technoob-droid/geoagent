@@ -11,6 +11,7 @@ from backend.app.tools.spatial_ops import (
     resolve_or_create_cardinal_hub,
     synthesize_regional_hazard_zones,
     generate_voronoi_catchments,
+    generate_isochrone_reachability,
 )
 from backend.app.tools.sql_runner import run_spatial_sql
 
@@ -27,6 +28,7 @@ ALL_SPATIAL_TOOLS = [
     resolve_or_create_cardinal_hub,
     synthesize_regional_hazard_zones,
     generate_voronoi_catchments,
+    generate_isochrone_reachability,
     run_spatial_sql,
 ]
 
@@ -44,5 +46,6 @@ __all__ = [
     "resolve_or_create_cardinal_hub",
     "synthesize_regional_hazard_zones",
     "generate_voronoi_catchments",
+    "generate_isochrone_reachability",
     "run_spatial_sql",
 ]
