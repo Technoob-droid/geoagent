@@ -49,7 +49,15 @@ export default function LayerCatalog({
   };
 
   const handleExportSelect = (layerId, layerName, format) => {
-    if (onExportLayer) {
+    if (format === 'shapefile') {
+      const exportUrl = `http://127.0.0.1:8000/api/export/shapefile/${layerId}`;
+      const link = document.createElement('a');
+      link.href = exportUrl;
+      link.setAttribute('download', `${layerId}_shapefile.zip`);
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    } else if (onExportLayer) {
       onExportLayer(layerId, layerName, format);
     }
     setActiveExportMenu(null);
@@ -150,7 +158,7 @@ export default function LayerCatalog({
 
                       {/* Export Format Popover */}
                       {isMenuOpen && (
-                        <div className="absolute right-0 top-full mt-1 w-32 bg-slate-900 border border-slate-700 rounded shadow-xl py-1 z-30">
+                        <div className="absolute right-0 top-full mt-1 w-36 bg-slate-900 border border-slate-700 rounded shadow-xl py-1 z-30">
                           <button
                             type="button"
                             onClick={() => handleExportSelect(layer.layer_id, layer.name, 'geojson')}
