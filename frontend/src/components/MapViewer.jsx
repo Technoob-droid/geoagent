@@ -1,7 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
 import maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
-import { Ruler, Pentagon, MapPin, X, Search, Loader2 } from 'lucide-react';
+import { Ruler, Pentagon, MapPin, X, Search, Loader2, BarChart3 } from 'lucide-react';
+import { COLOR_PALETTES, buildInterpolateColor } from '../utils/colorRamps';
 
 const CURRENT_LOCATION = [88.3639, 22.5726]; // Kolkata coordinates [lng, lat]
 
@@ -12,6 +13,17 @@ const PALETTE = [
   { fill: '#10b981', stroke: '#047857' },
   { fill: '#f59e0b', stroke: '#b45309' },
   { fill: '#6366f1', stroke: '#4338ca' }
+];
+
+const METRIC_PRIORITY_KEYS = [
+  'feature_count',
+  'metric_sum',
+  'metric_avg',
+  'metric_max',
+  'metric_min',
+  'count',
+  'population',
+  'risk_score'
 ];
 
 function getLayerColor(index) {
@@ -69,6 +81,44 @@ function computeBBox(geojson) {
   return [minX, minY, maxX, maxY];
 }
 
+function extractChoroplethDomain(geojson) {
+  if (!geojson || !geojson.features || geojson.features.length === 0) return null;
+
+  // Find candidate numeric property
+  const sampleProps = geojson.features[0]?.properties || {};
+  let selectedProp = null;
+
+  for (const k of METRIC_PRIORITY_KEYS) {
+    if (k in sampleProps && typeof Number(sampleProps[k]) === 'number' && !isNaN(Number(sampleProps[k]))) {
+      selectedProp = k;
+      break;
+    }
+  }
+
+  if (!selectedProp) {
+    for (const [key, val] of Object.entries(sampleProps)) {
+      const num = Number(val);
+      if (!isNaN(num) && !['cell_id', 'id', 'gid', 'cartodb_id'].includes(key.toLowerCase())) {
+        selectedProp = key;
+        break;
+      }
+    }
+  }
+
+  if (!selectedProp) return null;
+
+  const values = geojson.features
+    .map((f) => Number(f.properties?.[selectedProp]))
+    .filter((v) => !isNaN(v));
+
+  if (values.length === 0) return null;
+
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+
+  return { property: selectedProp, min, max };
+}
+
 export default function MapViewer({
   layers = [],
   hiddenLayers = new Set(),
@@ -89,6 +139,9 @@ export default function MapViewer({
   const userCoordRef = useRef(CURRENT_LOCATION);
   userCoordRef.current = userCoord;
 
+  // Active Choropleth Legend State
+  const [activeLegend, setActiveLegend] = useState(null);
+
   // Measurement tool state
   const [measureMode, setMeasureMode] = useState(null);
   const [measurePoints, setMeasurePoints] = useState([]);
@@ -103,7 +156,6 @@ export default function MapViewer({
   const [isSearchOpen, setIsSearchOpen] = useState(false);
   const searchDropdownRef = useRef(null);
 
-  // Fetch and update boundary polygons for current visible bounds
   const updateViewportBoundaries = async () => {
     const map = mapRef.current;
     if (!map) return;
@@ -133,7 +185,6 @@ export default function MapViewer({
     }
   };
 
-  // Close place search when clicking outside
   useEffect(() => {
     const handleClickOutside = (e) => {
       if (searchDropdownRef.current && !searchDropdownRef.current.contains(e.target)) {
@@ -144,7 +195,6 @@ export default function MapViewer({
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
-  // Debounced search for States / Districts
   useEffect(() => {
     if (searchQuery.trim().length < 2) {
       setSearchResults([]);
@@ -171,7 +221,6 @@ export default function MapViewer({
     return () => clearTimeout(timer);
   }, [searchQuery]);
 
-  // Zoom to chosen state or district
   const handleSelectPlace = (place) => {
     const map = mapRef.current;
     if (!map) return;
@@ -196,7 +245,6 @@ export default function MapViewer({
     }
   };
 
-  // Initialize Map
   useEffect(() => {
     if (mapRef.current) return;
 
@@ -235,7 +283,6 @@ export default function MapViewer({
     });
 
     map.on('load', () => {
-      // Dynamic Administrative Boundaries Layer
       map.addSource('admin-boundaries-source', {
         type: 'geojson',
         data: { type: 'FeatureCollection', features: [] }
@@ -262,7 +309,6 @@ export default function MapViewer({
         }
       });
 
-      // User location source & pulsing halo
       map.addSource('user-current-location', {
         type: 'geojson',
         data: {
@@ -302,7 +348,6 @@ export default function MapViewer({
         }
       });
 
-      // Measurement overlay source & layers
       map.addSource('measure-geojson', {
         type: 'geojson',
         data: { type: 'FeatureCollection', features: [] }
@@ -359,7 +404,6 @@ export default function MapViewer({
       }
     });
 
-    // Feature Click Popup & Cluster Zoom
     map.on('click', (e) => {
       if (measurePointsRef.current.modeActive) return;
 
@@ -481,6 +525,8 @@ export default function MapViewer({
         }
       }
 
+      let detectedLegend = null;
+
       for (let i = 0; i < layers.length; i++) {
         const layer = layers[i];
         const layerId = layer.layer_id;
@@ -601,14 +647,32 @@ export default function MapViewer({
                 }
               });
             } else {
+              // Check for continuous numerical metrics for choropleth mapping
+              const domain = extractChoroplethDomain(data);
+              const isChoropleth = domain && domain.min !== domain.max;
+
+              const fillColorExpr = isChoropleth
+                ? buildInterpolateColor(domain.property, domain.min, domain.max, COLOR_PALETTES.viridis)
+                : color.fill;
+
+              if (isChoropleth && !isHidden) {
+                detectedLegend = {
+                  layerName: layer.name || layerId,
+                  property: domain.property,
+                  min: domain.min,
+                  max: domain.max,
+                  palette: COLOR_PALETTES.viridis
+                };
+              }
+
               map.addLayer({
                 id: `${layerId}-polygon-fill`,
                 type: 'fill',
                 source: layerId,
                 layout: { visibility: isHidden ? 'none' : 'visible' },
                 paint: {
-                  'fill-color': color.fill,
-                  'fill-opacity': alpha * 0.55
+                  'fill-color': fillColorExpr,
+                  'fill-opacity': alpha * 0.7
                 }
               });
 
@@ -618,8 +682,8 @@ export default function MapViewer({
                 source: layerId,
                 layout: { visibility: isHidden ? 'none' : 'visible' },
                 paint: {
-                  'line-color': color.stroke,
-                  'line-width': 2,
+                  'line-color': isChoropleth ? '#ffffff' : color.stroke,
+                  'line-width': isChoropleth ? 1.5 : 2,
                   'line-opacity': alpha
                 }
               });
@@ -640,8 +704,25 @@ export default function MapViewer({
           } catch (err) {
             console.error(`Failed to load layer ${layerId}:`, err);
           }
+        } else {
+          // If layer already loaded, evaluate active legend candidate
+          const existing = loadedLayersRef.current.get(layerId);
+          if (existing && existing.geomType !== 'POINT' && !isHidden) {
+            const domain = extractChoroplethDomain(existing.geojson);
+            if (domain && domain.min !== domain.max && !detectedLegend) {
+              detectedLegend = {
+                layerName: layer.name || layerId,
+                property: domain.property,
+                min: domain.min,
+                max: domain.max,
+                palette: COLOR_PALETTES.viridis
+              };
+            }
+          }
         }
       }
+
+      setActiveLegend(detectedLegend);
     };
 
     syncLayers();
@@ -688,7 +769,7 @@ export default function MapViewer({
         const visibility = isHidden ? 'none' : 'visible';
         if (map.getLayer(`${layerId}-polygon-fill`)) {
           map.setLayoutProperty(`${layerId}-polygon-fill`, 'visibility', visibility);
-          if (!isHidden) map.setPaintProperty(`${layerId}-polygon-fill`, 'fill-opacity', alpha * 0.55);
+          if (!isHidden) map.setPaintProperty(`${layerId}-polygon-fill`, 'fill-opacity', alpha * 0.7);
         }
         if (map.getLayer(`${layerId}-polygon-stroke`)) {
           map.setLayoutProperty(`${layerId}-polygon-stroke`, 'visibility', visibility);
@@ -776,7 +857,6 @@ export default function MapViewer({
     source.setData({ type: 'FeatureCollection', features });
   }, [measurePoints, measureMode, mapReady]);
 
-  // Action: Start from Current Location
   const handleStartFromCurrentLocation = () => {
     const origin = userCoordRef.current;
     setMeasureMode('distance');
@@ -792,7 +872,6 @@ export default function MapViewer({
     setMeasureResult(null);
   };
 
-  // Handle Zoom to Layer Request
   useEffect(() => {
     if (!zoomLayerId || !mapRef.current) return;
     const item = loadedLayersRef.current.get(zoomLayerId);
@@ -831,9 +910,8 @@ export default function MapViewer({
         }
       `}</style>
 
-      {/* Top Floating Control Bar: Measurement Tools + Nationwide Place Search */}
+      {/* Top Floating Control Bar */}
       <div className="absolute top-4 left-4 z-20 flex flex-wrap items-center gap-2">
-        {/* Measurement Toolbar */}
         <div className="flex items-center space-x-1.5 bg-slate-900/90 backdrop-blur-md border border-slate-800 rounded-lg p-1.5 shadow-xl text-xs">
           <button
             type="button"
@@ -947,6 +1025,35 @@ export default function MapViewer({
           )}
         </div>
       </div>
+
+      {/* Floating Dynamic Choropleth Legend */}
+      {activeLegend && (
+        <div className="absolute bottom-6 left-4 z-20 bg-slate-900/90 backdrop-blur-md border border-slate-800 rounded-lg p-3 shadow-xl text-xs w-60">
+          <div className="flex items-center space-x-1.5 text-slate-300 font-semibold uppercase tracking-wider text-[10px] mb-1.5">
+            <BarChart3 className="w-3.5 h-3.5 text-indigo-400" />
+            <span className="truncate">{activeLegend.layerName}</span>
+          </div>
+
+          <div className="text-[10px] text-slate-400 font-mono mb-2 truncate">
+            Metric: <span className="text-sky-300 font-medium">{activeLegend.property}</span>
+          </div>
+
+          {/* Color Gradient Strip */}
+          <div
+            className="h-2.5 w-full rounded-sm shadow-inner"
+            style={{
+              background: `linear-gradient(to right, ${activeLegend.palette.join(', ')})`
+            }}
+          />
+
+          {/* Min and Max Range */}
+          <div className="flex justify-between items-center text-[10px] text-slate-400 font-mono mt-1">
+            <span>{activeLegend.min}</span>
+            <span>{((activeLegend.min + activeLegend.max) / 2).toFixed(1)}</span>
+            <span>{activeLegend.max}</span>
+          </div>
+        </div>
+      )}
 
       <div
         ref={mapContainer}

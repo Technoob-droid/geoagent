@@ -22,6 +22,26 @@ SYSTEM_ADMIN_LAYERS = {
     "india_villages",
 }
 
+# Generic noun mapping to facilitate natural conversational requests
+GENERIC_NOUN_LAYER_MAP = {
+    "cities": "india_cities",
+    "city": "india_cities",
+    "towns": "india_cities",
+    "town": "india_cities",
+    "districts": "india_districts",
+    "district": "india_districts",
+    "states": "india_states",
+    "state": "india_states",
+    "villages": "india_villages",
+    "village": "india_villages",
+    "subdistricts": "india_subdistricts",
+    "subdistrict": "india_subdistricts",
+    "tehsils": "india_subdistricts",
+    "tehsil": "india_subdistricts",
+    "taluks": "india_subdistricts",
+    "taluk": "india_subdistricts",
+}
+
 CARDINAL_OFFSETS = {
     "north": (0.0, 1.0),
     "south": (0.0, -1.0),
@@ -283,7 +303,7 @@ def list_available_layers() -> str:
 @tool
 def get_layer_schema(layer_id: str) -> str:
     """Returns spatial metadata, geometry type, coordinate bounds, and attribute schema for a layer."""
-    resolved_id = catalog_manager.resolve_layer_id(layer_id) or layer_id
+    resolved_id = catalog_manager.resolve_layer_id(layer_id) or GENERIC_NOUN_LAYER_MAP.get(layer_id.strip().lower(), layer_id)
     details = catalog_manager.get_layer_details(resolved_id)
     if not details:
         return f"Error: Layer '{layer_id}' does not exist in catalog."
@@ -298,20 +318,34 @@ def filter_by_admin_boundary(
     target_layer_id: str,
     admin_tier: str,
     place_name: str,
-    output_layer_id: str,
-    output_layer_name: str
+    output_layer_id: str = "",
+    output_layer_name: str = ""
 ) -> str:
     """
     Spatially filters entities from target_layer_id that fall inside a specific administrative boundary.
-    Handles fuzzy spelling of place_name automatically.
+    Automatically handles generic nouns ('cities', 'villages') and historical name spellings.
     """
-    resolved_target = catalog_manager.resolve_layer_id(target_layer_id)
-    if not resolved_target:
+    raw_norm = target_layer_id.strip().lower()
+    candidate_target = GENERIC_NOUN_LAYER_MAP.get(raw_norm, target_layer_id)
+    resolved_target = catalog_manager.resolve_layer_id(candidate_target) or candidate_target
+
+    all_layers = [l["layer_id"] for l in catalog_manager.list_layers()]
+    if resolved_target not in all_layers and resolved_target not in SYSTEM_ADMIN_LAYERS:
         return json.dumps({
             "status": "error",
-            "message": f"Layer '{target_layer_id}' could not be found in the active catalog."
+            "message": f"Target layer '{target_layer_id}' could not be resolved to an active dataset."
         })
-    target_layer_id = resolved_target
+
+    # Normalize tier (handle 'state'/'states', 'district'/'districts', etc.)
+    t = admin_tier.lower().strip()
+    if t in ("state", "states"):
+        tier = "states"
+    elif t in ("district", "districts"):
+        tier = "districts"
+    elif t in ("subdistrict", "subdistricts", "taluk", "tehsil"):
+        tier = "subdistricts"
+    else:
+        tier = t
 
     admin_map = {
         "states": ("india_states", "state_name"),
@@ -319,22 +353,24 @@ def filter_by_admin_boundary(
         "subdistricts": ("india_subdistricts", "subdistrict_name")
     }
 
-    tier = admin_tier.lower().strip()
     if tier not in admin_map:
         return json.dumps({
             "status": "error",
-            "message": f"Invalid admin_tier '{admin_tier}'. Must be one of: {list(admin_map.keys())}"
+            "message": f"Invalid admin_tier '{admin_tier}'. Must be 'states', 'districts', or 'subdistricts'."
         })
 
     boundary_table, name_col = admin_map[tier]
     clean_target = _clean_token(place_name)
     alias_target = INDIAN_PLACE_ALIASES.get(clean_target, clean_target)
 
+    clean_out_id = output_layer_id.strip().lower().replace(" ", "_") if output_layer_id else f"{clean_target}_{resolved_target}"
+    clean_out_name = output_layer_name or f"{place_name.title()} {resolved_target.replace('india_', '').title()}"
+
     sql = f"""
         SELECT 
             t.* EXCLUDE (geom),
             t.geom
-        FROM {target_layer_id} t
+        FROM {resolved_target} t
         JOIN {boundary_table} b ON ST_Intersects(t.geom, b.geom)
         WHERE lower(b.{name_col}) LIKE '%{clean_target}%'
            OR lower(b.{name_col}) LIKE '%{alias_target}%';
@@ -342,9 +378,9 @@ def filter_by_admin_boundary(
 
     res = spatial_engine.execute_spatial_query(
         query=sql,
-        output_layer_id=output_layer_id,
-        layer_name=output_layer_name,
-        description=f"Features in {target_layer_id} within {admin_tier} '{place_name}'"
+        output_layer_id=clean_out_id,
+        layer_name=clean_out_name,
+        description=f"Features in {resolved_target} within {tier} '{place_name}'"
     )
     return json.dumps(res)
 
@@ -359,13 +395,16 @@ def find_near_place(
     output_layer_name: str
 ) -> str:
     """Finds features in target_layer_id located within distance_km of a named Indian place."""
-    resolved_target = catalog_manager.resolve_layer_id(target_layer_id)
-    if not resolved_target:
+    raw_norm = target_layer_id.strip().lower()
+    candidate_target = GENERIC_NOUN_LAYER_MAP.get(raw_norm, target_layer_id)
+    resolved_target = catalog_manager.resolve_layer_id(candidate_target) or candidate_target
+
+    all_layers = [l["layer_id"] for l in catalog_manager.list_layers()]
+    if resolved_target not in all_layers and resolved_target not in SYSTEM_ADMIN_LAYERS:
         return json.dumps({
             "status": "error",
             "message": f"Layer '{target_layer_id}' could not be found in the active catalog."
         })
-    target_layer_id = resolved_target
 
     resolved = _find_fuzzy_admin_entity(place_name)
     if not resolved:
@@ -381,7 +420,7 @@ def find_near_place(
         SELECT 
             t.* EXCLUDE (geom),
             t.geom
-        FROM {target_layer_id} t
+        FROM {resolved_target} t
         WHERE ST_DWithin(t.geom, ST_SetCRS(ST_Point({c_lon}, {c_lat}), 'EPSG:4326'), {deg_radius});
     """
 
@@ -389,7 +428,7 @@ def find_near_place(
         query=sql,
         output_layer_id=output_layer_id,
         layer_name=output_layer_name,
-        description=f"Features in {target_layer_id} within {distance_km}km of {matched_name}"
+        description=f"Features in {resolved_target} within {distance_km}km of {matched_name}"
     )
     return json.dumps(res)
 
@@ -526,13 +565,9 @@ def spatial_filter_within(
     output_layer_name: str
 ) -> str:
     """Filters features in target_layer_id that are completely contained within or intersect boundary_layer_id."""
-    resolved_target = catalog_manager.resolve_layer_id(target_layer_id)
-    if not resolved_target:
-        return json.dumps({
-            "status": "error",
-            "message": f"Target layer '{target_layer_id}' could not be found in the active catalog."
-        })
-    target_layer_id = resolved_target
+    raw_norm = target_layer_id.strip().lower()
+    candidate_target = GENERIC_NOUN_LAYER_MAP.get(raw_norm, target_layer_id)
+    resolved_target = catalog_manager.resolve_layer_id(candidate_target) or candidate_target
 
     resolved_boundary = catalog_manager.resolve_layer_id(boundary_layer_id)
     if not resolved_boundary:
@@ -540,20 +575,19 @@ def spatial_filter_within(
             "status": "error",
             "message": f"Boundary layer '{boundary_layer_id}' could not be found in the active catalog."
         })
-    boundary_layer_id = resolved_boundary
 
     sql = f"""
         SELECT
             a.* EXCLUDE (geom),
             a.geom
-        FROM {target_layer_id} a
-        JOIN {boundary_layer_id} b ON ST_Intersects(a.geom, b.geom);
+        FROM {resolved_target} a
+        JOIN {resolved_boundary} b ON ST_Intersects(a.geom, b.geom);
     """
     res = spatial_engine.execute_spatial_query(
         query=sql,
         output_layer_id=output_layer_id,
         layer_name=output_layer_name,
-        description=f"Features in {target_layer_id} within {boundary_layer_id}"
+        description=f"Features in {resolved_target} within {resolved_boundary}"
     )
     return json.dumps(res)
 
@@ -924,8 +958,10 @@ def generate_voronoi_catchments(
         output_layer_id: Unique ID for the resulting polygon catchment layer.
         clip_to_layer_id: Optional polygon layer ID to clip Voronoi boundaries (e.g., a district or state boundary).
     """
+    raw_norm = input_layer_id.strip().lower()
+    candidate_in = GENERIC_NOUN_LAYER_MAP.get(raw_norm, input_layer_id)
+    clean_in_id = _clean_token(candidate_in).replace(" ", "_")
     clean_out_id = _clean_token(output_layer_id).replace(" ", "_")
-    clean_in_id = _clean_token(input_layer_id).replace(" ", "_")
 
     # 1. Fetch points from input layer
     try:
@@ -1202,12 +1238,9 @@ def aggregate_catchment_metrics(
             "message": f"Catchment layer '{catchment_layer_id}' could not be found in catalog."
         })
 
-    resolved_target = catalog_manager.resolve_layer_id(target_layer_id)
-    if not resolved_target:
-        return json.dumps({
-            "status": "error",
-            "message": f"Target layer '{target_layer_id}' could not be found in catalog."
-        })
+    raw_norm = target_layer_id.strip().lower()
+    candidate_target = GENERIC_NOUN_LAYER_MAP.get(raw_norm, target_layer_id)
+    resolved_target = catalog_manager.resolve_layer_id(candidate_target) or candidate_target
 
     clean_out_id = output_layer_id.strip().lower().replace(" ", "_") if output_layer_id else f"{resolved_catchment}_agg_{resolved_target}"
     clean_out_name = output_layer_name or f"{resolved_catchment} Aggregated with {resolved_target}"
