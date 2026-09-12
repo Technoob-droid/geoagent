@@ -1379,3 +1379,67 @@ def generate_multi_ring_buffers(
         f"as '{clean_out_id}'."
     )
     return json.dumps(res)
+
+@tool
+def filter_by_admin_boundary(
+    target_layer_id: str,
+    admin_tier: str,
+    place_name: str,
+    output_layer_id: str,
+    output_layer_name: Optional[str] = None
+) -> str:
+    """
+    Filters features from a target layer (e.g. 'india_cities', 'india_villages') 
+    that fall inside a specific administrative boundary (e.g. 'Maharashtra', 'Odisha', 'Kolkata').
+    admin_tier should be 'states' or 'districts'.
+    """
+    try:
+        tier = admin_tier.lower().strip()
+        boundary_table = "india_states" if "state" in tier else "india_districts"
+        name_col = "state_name" if "state" in tier else "district_name"
+
+        clean_output_id = output_layer_id.strip().lower().replace(" ", "_")
+        disp_name = output_layer_name or clean_output_id.replace("_", " ").title()
+
+        sql = f"""
+        CREATE OR REPLACE TABLE {clean_output_id} AS
+        SELECT t.* EXCLUDE (geom), t.geom
+        FROM {target_layer_id} t
+        JOIN {boundary_table} b ON ST_Intersects(t.geom, b.geom)
+        WHERE lower(b.{name_col}) LIKE '%{place_name.lower().strip()}%';
+        """
+
+        spatial_engine.con.execute(sql)
+        count = spatial_engine.con.execute(f"SELECT COUNT(*) FROM {clean_output_id}").fetchone()[0]
+
+        if count == 0:
+            return json.dumps({
+                "status": "success",
+                "message": f"Query executed successfully, but 0 features from '{target_layer_id}' were found within '{place_name}'.",
+                "feature_count": 0
+            })
+
+        sample_row = spatial_engine.con.execute(f"SELECT ST_GeometryType(geom) FROM {clean_output_id} LIMIT 1").fetchone()
+        geom_type = sample_row[0] if sample_row else "POLYGON"
+
+        catalog_manager.add_layer(
+            layer_id=clean_output_id,
+            name=disp_name,
+            table_name=clean_output_id,
+            geom_type=geom_type,
+            feature_count=count
+        )
+
+        return json.dumps({
+            "status": "success",
+            "layer_id": clean_output_id,
+            "layer_name": disp_name,
+            "feature_count": count,
+            "geom_type": geom_type,
+            "message": f"Successfully filtered {count} features inside {place_name} into layer '{clean_output_id}'."
+        })
+    except Exception as e:
+        return json.dumps({
+            "status": "error",
+            "message": f"Failed to filter by admin boundary: {str(e)}"
+        })

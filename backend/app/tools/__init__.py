@@ -1,6 +1,7 @@
 from backend.app.tools.spatial_ops import (
     list_available_layers,
     get_layer_schema,
+    filter_by_admin_boundary,
     buffer_layer,
     spatial_intersection,
     spatial_difference,
@@ -20,6 +21,7 @@ from backend.app.tools.sql_runner import run_attribute_sql, run_spatial_sql
 ALL_SPATIAL_TOOLS = [
     list_available_layers,
     get_layer_schema,
+    filter_by_admin_boundary,
     buffer_layer,
     spatial_intersection,
     spatial_difference,
@@ -34,7 +36,6 @@ ALL_SPATIAL_TOOLS = [
     aggregate_catchment_metrics,
     generate_multi_ring_buffers,
     run_spatial_sql,
-    run_spatial_sql,
     run_attribute_sql,
 ]
 
@@ -42,6 +43,7 @@ __all__ = [
     "ALL_SPATIAL_TOOLS",
     "list_available_layers",
     "get_layer_schema",
+    "filter_by_admin_boundary",
     "buffer_layer",
     "spatial_intersection",
     "spatial_difference",
