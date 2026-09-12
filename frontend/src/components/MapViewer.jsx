@@ -16,11 +16,12 @@ const PALETTE = [
 ];
 
 const METRIC_PRIORITY_KEYS = [
-  'feature_count',
+  'feature_count',    // Prioritizes aggregated counts (e.g., villages exposed)
   'metric_sum',
   'metric_avg',
   'metric_max',
   'metric_min',
+  'ring_order',       // Falls back to buffer ring tier when no count is present
   'count',
   'population',
   'risk_score'
@@ -691,9 +692,24 @@ export default function MapViewer({
 
             loadedLayersRef.current.set(layerId, { geojson: data, geomType, color });
 
-            if (!initialZoomDoneRef.current) {
-              const bbox = computeBBox(data);
-              if (bbox) {
+            // Do not auto-zoom on base countrywide background layers
+            const isBaseAdmin = [
+              'india_states',
+              'india_districts',
+              'india_subdistricts',
+              'india_cities',
+              'india_villages'
+            ].includes(layerId);
+
+            const bbox = computeBBox(data);
+            if (bbox) {
+              if (!isBaseAdmin) {
+                // Smoothly zoom into any newly materialized user/analytical layer
+                map.fitBounds(
+                  [[bbox[0], bbox[1]], [bbox[2], bbox[3]]],
+                  { padding: 80, maxZoom: 13, duration: 1200 }
+                );
+              } else if (!initialZoomDoneRef.current) {
                 map.fitBounds(
                   [[bbox[0], bbox[1]], [bbox[2], bbox[3]]],
                   { padding: 80, maxZoom: 14, duration: 1000 }

@@ -13,6 +13,7 @@ from backend.app.tools.spatial_ops import (
     generate_voronoi_catchments,
     generate_isochrone_reachability,
     aggregate_catchment_metrics,
+    generate_multi_ring_buffers,
 )
 from backend.app.tools.sql_runner import run_spatial_sql
 
@@ -31,6 +32,7 @@ ALL_SPATIAL_TOOLS = [
     generate_voronoi_catchments,
     generate_isochrone_reachability,
     aggregate_catchment_metrics,
+    generate_multi_ring_buffers,
     run_spatial_sql,
 ]
 
@@ -50,5 +52,6 @@ __all__ = [
     "generate_voronoi_catchments",
     "generate_isochrone_reachability",
     "aggregate_catchment_metrics",
+    "generate_multi_ring_buffers",
     "run_spatial_sql",
 ]

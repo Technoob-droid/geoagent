@@ -1283,3 +1283,99 @@ def aggregate_catchment_metrics(
         f"with {agg_op.upper()} metric attached to catchment polygons."
     )
     return json.dumps(res)
+
+@tool
+def generate_multi_ring_buffers(
+    input_layer_id: str,
+    distances_meters: str,
+    output_layer_id: str = "",
+    output_layer_name: str = "",
+    create_donuts: bool = True
+) -> str:
+    """
+    Generates concentric multi-ring buffer bands around points, lines, or polygons.
+    
+    Args:
+        input_layer_id: The source layer to buffer (or generic noun like 'cities').
+        distances_meters: Comma-separated list of ascending buffer distances in meters (e.g., '500, 1000, 2000').
+        output_layer_id: Unique identifier for the resulting polygonal band layer.
+        output_layer_name: Human-readable label for UI and map display.
+        create_donuts: If True, rings are hollow donut polygons (non-overlapping).
+    """
+    raw_norm = input_layer_id.strip().lower()
+    candidate_in = GENERIC_NOUN_LAYER_MAP.get(raw_norm, input_layer_id)
+    resolved_in = catalog_manager.resolve_layer_id(candidate_in) or candidate_in
+
+    try:
+        dist_list = sorted([float(d.strip()) for d in distances_meters.split(",") if d.strip()])
+    except ValueError:
+        return json.dumps({
+            "status": "error",
+            "message": f"Invalid distances format '{distances_meters}'. Use comma-separated numbers (e.g., '500, 1000, 2000')."
+        })
+
+    if not dist_list:
+        return json.dumps({"status": "error", "message": "No valid distances provided."})
+
+    clean_out_id = output_layer_id.strip().lower().replace(" ", "_") if output_layer_id else f"{resolved_in}_multibuffer"
+    clean_out_name = output_layer_name or f"{resolved_in.title()} Multi-Ring Buffers"
+
+    subqueries = []
+    prev_dist = 0.0
+
+    for idx, dist in enumerate(dist_list):
+        deg_dist = dist / 111139.0
+        ring_order = idx + 1
+        tier_label = f"{int(prev_dist)}m - {int(dist)}m" if create_donuts and prev_dist > 0 else f"0m - {int(dist)}m"
+
+        if create_donuts and prev_dist > 0:
+            deg_prev = prev_dist / 111139.0
+            subqueries.append(f"""
+                SELECT 
+                    {ring_order} AS ring_order,
+                    {dist} AS outer_distance_m,
+                    {prev_dist} AS inner_distance_m,
+                    '{tier_label}' AS buffer_band,
+                    ST_SetCRS(
+                        ST_Difference(
+                            ST_Buffer(geom, {deg_dist}),
+                            ST_Buffer(geom, {deg_prev})
+                        ), 
+                        'EPSG:4326'
+                    ) AS geom
+                FROM {resolved_in}
+                WHERE geom IS NOT NULL
+            """)
+        else:
+            subqueries.append(f"""
+                SELECT 
+                    {ring_order} AS ring_order,
+                    {dist} AS outer_distance_m,
+                    0.0 AS inner_distance_m,
+                    '{tier_label}' AS buffer_band,
+                    ST_SetCRS(ST_Buffer(geom, {deg_dist}), 'EPSG:4326') AS geom
+                FROM {resolved_in}
+                WHERE geom IS NOT NULL
+            """)
+        prev_dist = dist
+
+    union_sql = " UNION ALL ".join(subqueries)
+    materialize_sql = f"""
+        WITH buffered_bands AS (
+            {union_sql}
+        )
+        SELECT * FROM buffered_bands WHERE NOT ST_IsEmpty(geom);
+    """
+
+    res = spatial_engine.execute_spatial_query(
+        query=materialize_sql,
+        output_layer_id=clean_out_id,
+        layer_name=clean_out_name,
+        description=f"Multi-ring tiered buffer bands ({distances_meters}m) around {resolved_in}"
+    )
+
+    res["message"] = (
+        f"Generated {len(dist_list)} concentric buffer tiers ({', '.join(f'{int(d)}m' for d in dist_list)}) "
+        f"as '{clean_out_id}'."
+    )
+    return json.dumps(res)
