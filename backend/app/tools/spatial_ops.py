@@ -9,18 +9,11 @@ from typing import Optional, Tuple
 import httpx
 from langchain_core.tools import tool
 from backend.app.tools.engine import spatial_engine
-from backend.app.tools.catalog import catalog_manager
-
+from backend.app.tools.catalog import catalog_manager, PROTECTED_BASE_LAYERS
 
 logger = logging.getLogger("geoagent.tools")
 
-SYSTEM_ADMIN_LAYERS = {
-    "india_states",
-    "india_districts",
-    "india_subdistricts",
-    "india_cities",
-    "india_villages",
-}
+SYSTEM_ADMIN_LAYERS = set(PROTECTED_BASE_LAYERS)
 
 # Generic noun mapping to facilitate natural conversational requests
 GENERIC_NOUN_LAYER_MAP = {
@@ -116,7 +109,7 @@ def _clean_token(raw_text: str) -> str:
 def _find_fuzzy_admin_entity(raw_name: str) -> Optional[Tuple[str, float, float, float]]:
     """
     Finds geographic centroid and extent using multi-stage matching:
-    1. Direct & SQL wildcards against States, Districts, Cities, and Subdistricts.
+    1. Direct & SQL wildcards against Cities (priority), States, Districts, and Subdistricts.
     2. Alias mapping lookup.
     3. In-memory fuzzy match across administrative labels using difflib.
     Returns: (matched_name, center_lon, center_lat, extent_deg)
@@ -128,8 +121,18 @@ def _find_fuzzy_admin_entity(raw_name: str) -> Optional[Tuple[str, float, float,
     alias_target = INDIAN_PLACE_ALIASES.get(clean_target, clean_target)
     prefix_target = clean_target[:4] if len(clean_target) >= 4 else clean_target
 
-    # Stage 1: Exact, Alias, and Substring SQL Lookup
+    # Stage 1: Exact, Alias, and Substring SQL Lookup (india_cities prioritized over subdistricts)
     sql_exact = f"""
+        SELECT 
+            city_name AS name, 
+            ST_X(geom) AS lon, 
+            ST_Y(geom) AS lat, 
+            0.08 AS extent_deg
+        FROM india_cities
+        WHERE lower(city_name) IN ('{clean_target}', '{alias_target}')
+           OR lower(city_name) LIKE '%{clean_target}%'
+           OR lower(city_name) LIKE '%{alias_target}%'
+        UNION ALL
         SELECT 
             state_name AS name, 
             ST_X(ST_Centroid(geom)) AS lon, 
@@ -152,16 +155,6 @@ def _find_fuzzy_admin_entity(raw_name: str) -> Optional[Tuple[str, float, float,
            OR lower(district_name) LIKE '%{alias_target}%'
         UNION ALL
         SELECT 
-            city_name AS name, 
-            ST_X(geom) AS lon, 
-            ST_Y(geom) AS lat, 
-            0.08 AS extent_deg
-        FROM india_cities
-        WHERE lower(city_name) IN ('{clean_target}', '{alias_target}')
-           OR lower(city_name) LIKE '%{clean_target}%'
-           OR lower(city_name) LIKE '%{alias_target}%'
-        UNION ALL
-        SELECT 
             subdistrict_name AS name, 
             ST_X(ST_Centroid(geom)) AS lon, 
             ST_Y(ST_Centroid(geom)) AS lat, 
@@ -179,17 +172,17 @@ def _find_fuzzy_admin_entity(raw_name: str) -> Optional[Tuple[str, float, float,
     except Exception as e:
         logger.warning(f"Stage 1 exact lookup error: {e}")
 
-    # Stage 2: Prefix Matching
+    # Stage 2: Prefix Matching (Cities prioritized)
     if len(prefix_target) >= 3:
         sql_prefix = f"""
+            SELECT city_name AS name, ST_X(geom) AS lon, ST_Y(geom) AS lat, 0.08 AS extent_deg
+            FROM india_cities
+            WHERE lower(city_name) LIKE '{prefix_target}%'
+            UNION ALL
             SELECT district_name AS name, ST_X(ST_Centroid(geom)) AS lon, ST_Y(ST_Centroid(geom)) AS lat,
                    ((ST_YMax(geom) - ST_YMin(geom)) * 0.3) AS extent_deg
             FROM india_districts
             WHERE lower(district_name) LIKE '{prefix_target}%'
-            UNION ALL
-            SELECT city_name AS name, ST_X(geom) AS lon, ST_Y(geom) AS lat, 0.08 AS extent_deg
-            FROM india_cities
-            WHERE lower(city_name) LIKE '{prefix_target}%'
             LIMIT 1;
         """
         try:
@@ -199,11 +192,11 @@ def _find_fuzzy_admin_entity(raw_name: str) -> Optional[Tuple[str, float, float,
         except Exception as e:
             logger.warning(f"Stage 2 prefix lookup error: {e}")
 
-    # Stage 3: Python Fuzzy Fallback across District and City indices
+    # Stage 3: Python Fuzzy Fallback across City and District indices (Cities prioritized)
     try:
-        districts = [r[0] for r in spatial_engine.con.execute("SELECT district_name FROM india_districts WHERE district_name IS NOT NULL").fetchall() if r and len(r) > 0]
         cities = [r[0] for r in spatial_engine.con.execute("SELECT city_name FROM india_cities WHERE city_name IS NOT NULL").fetchall() if r and len(r) > 0]
-        pool = districts + cities
+        districts = [r[0] for r in spatial_engine.con.execute("SELECT district_name FROM india_districts WHERE district_name IS NOT NULL").fetchall() if r and len(r) > 0]
+        pool = cities + districts
         candidates = difflib.get_close_matches(clean_target, pool, n=1, cutoff=0.55)
         if not candidates and alias_target != clean_target:
             candidates = difflib.get_close_matches(alias_target, pool, n=1, cutoff=0.55)
@@ -211,14 +204,14 @@ def _find_fuzzy_admin_entity(raw_name: str) -> Optional[Tuple[str, float, float,
         if candidates:
             best = candidates[0].replace("'", "''")
             sql_best = f"""
+                SELECT city_name AS name, ST_X(geom) AS lon, ST_Y(geom) AS lat, 0.08 AS extent_deg
+                FROM india_cities
+                WHERE lower(city_name) = lower('{best}')
+                UNION ALL
                 SELECT district_name AS name, ST_X(ST_Centroid(geom)) AS lon, ST_Y(ST_Centroid(geom)) AS lat,
                        ((ST_YMax(geom) - ST_YMin(geom)) * 0.3) AS extent_deg
                 FROM india_districts
                 WHERE lower(district_name) = lower('{best}')
-                UNION ALL
-                SELECT city_name AS name, ST_X(geom) AS lon, ST_Y(geom) AS lat, 0.08 AS extent_deg
-                FROM india_cities
-                WHERE lower(city_name) = lower('{best}')
                 LIMIT 1;
             """
             row = spatial_engine.con.execute(sql_best).fetchone()
@@ -613,28 +606,47 @@ def execute_custom_spatial_sql(
 
 @tool
 def delete_layer(layer_id: str) -> str:
-    """Deletes an existing user analytical spatial layer."""
-    resolved_id = catalog_manager.resolve_layer_id(layer_id) or layer_id
-
+    """
+    Permanently removes a user-generated analytical layer from DuckDB and catalog metadata.
+    Protected system boundaries cannot be deleted.
+    """
+    resolved_id = catalog_manager.resolve_layer_id(layer_id) or layer_id.strip().lower()
     if resolved_id in SYSTEM_ADMIN_LAYERS:
         return json.dumps({
             "status": "error",
             "message": f"Permission denied: '{resolved_id}' is a core system administrative dataset and cannot be deleted."
         })
 
-    try:
-        spatial_engine.con.execute(f"DROP TABLE IF EXISTS {resolved_id};")
-        spatial_engine.con.execute(f"DELETE FROM spatial_catalog WHERE layer_id = '{resolved_id}';")
+    catalog_manager.unregister_layer(resolved_id)
+    return json.dumps({
+        "status": "success",
+        "message": f"Layer '{resolved_id}' successfully dropped from database and catalog.",
+        "deleted_layer_id": resolved_id,
+        "deleted_layers": [resolved_id]
+    })
+
+
+@tool
+def delete_layers_matching(pattern_or_keywords: str) -> str:
+    """
+    Deletes all analytical layers matching wildcard '*' or comma/space-separated keywords (e.g. 'buffers, exposure, tamil').
+    Core reference boundary layers are strictly protected.
+    """
+    deleted = catalog_manager.purge_layers(pattern_or_keywords)
+    if not deleted:
         return json.dumps({
             "status": "success",
-            "message": f"Layer '{resolved_id}' successfully dropped from database and catalog.",
-            "deleted_layer_id": resolved_id
+            "message": "No matching analytical layers found to delete.",
+            "deleted_count": 0,
+            "deleted_layers": []
         })
-    except Exception as e:
-        return json.dumps({
-            "status": "error",
-            "message": f"Failed to delete layer '{resolved_id}': {str(e)}"
-        })
+
+    return json.dumps({
+        "status": "success",
+        "message": f"Successfully deleted {len(deleted)} analytical layers.",
+        "deleted_count": len(deleted),
+        "deleted_layers": deleted
+    })
 
 
 @tool
@@ -905,60 +917,20 @@ def synthesize_regional_hazard_zones(
 
 
 @tool
-def delete_layers_matching(
-    pattern_or_keywords: str
-) -> str:
-    """
-    Deletes all user-created analytical spatial layers whose IDs or names match 
-    any of the given comma-separated keywords (e.g., 'chennai, vizag, cuttack, flood, buffer').
-    System administrative datasets are protected and will never be deleted.
-    """
-    keywords = [k.strip().lower() for k in pattern_or_keywords.split(",") if k.strip()]
-    if not keywords:
-        return json.dumps({"status": "error", "message": "No keywords provided for deletion."})
-
-    all_layers = catalog_manager.list_layers()
-    deleted = []
-    skipped = []
-
-    for l in all_layers:
-        lid = l["layer_id"]
-        lname = l.get("name", "").lower()
-        if lid in SYSTEM_ADMIN_LAYERS:
-            continue
-        
-        # Check if any keyword matches layer_id or name
-        if any(kw in lid.lower() or kw in lname for kw in keywords):
-            try:
-                spatial_engine.con.execute(f"DROP TABLE IF EXISTS {lid};")
-                spatial_engine.con.execute(f"DELETE FROM spatial_catalog WHERE layer_id = '{lid}';")
-                deleted.append(lid)
-            except Exception as e:
-                logger.warning(f"Failed to drop {lid}: {e}")
-                skipped.append(lid)
-
-    return json.dumps({
-        "status": "success",
-        "deleted_count": len(deleted),
-        "deleted_layers": deleted,
-        "message": f"Successfully purged {len(deleted)} layers matching [{pattern_or_keywords}]."
-    })
-
-
-@tool
 def generate_voronoi_catchments(
     input_layer_id: str,
     output_layer_id: str,
-    clip_to_layer_id: Optional[str] = None
+    clip_to_layer_id: Optional[str] = "india_states",
+    clip_place_name: Optional[str] = None
 ) -> str:
     """
-    Generates Voronoi (Thiessen) catchment polygons around a point layer.
-    Useful for service area delineation (e.g., hospital catchment areas, relief centers).
+    Generates Voronoi (Thiessen) catchment polygons around a point layer, clipped to an administrative boundary.
 
     Args:
         input_layer_id: ID of the point layer containing seed sites.
         output_layer_id: Unique ID for the resulting polygon catchment layer.
-        clip_to_layer_id: Optional polygon layer ID to clip Voronoi boundaries (e.g., a district or state boundary).
+        clip_to_layer_id: Polygon layer ID to clip Voronoi boundaries (default: 'india_states').
+        clip_place_name: Specific state or district name to clip to (e.g. 'Tamil Nadu').
     """
     raw_norm = input_layer_id.strip().lower()
     candidate_in = GENERIC_NOUN_LAYER_MAP.get(raw_norm, input_layer_id)
@@ -994,23 +966,33 @@ def generate_voronoi_catchments(
 
     # 2. Compute Voronoi diagrams via Shapely
     multi_pt = MultiPoint(shapely_pts)
-    env = multi_pt.envelope.buffer(0.2)
+    env = multi_pt.envelope.buffer(0.5)
     voronoi_collection = voronoi_diagram(multi_pt, envelope=env)
 
-    # 3. Optional clipping geometry
+    # 3. Resolve Clipping Geometry
     clip_geom = None
-    if clip_to_layer_id:
-        try:
-            clean_clip = _clean_token(clip_to_layer_id).replace(" ", "_")
-            resolved_clip = catalog_manager.resolve_layer_id(clean_clip) or clean_clip
-            clip_q = f"SELECT ST_AsGeoJSON(ST_Union_Agg(geom)) as gj FROM {resolved_clip} WHERE geom IS NOT NULL;"
-            clip_res = spatial_engine.con.execute(clip_q).fetchone()
-            if clip_res and clip_res[0]:
-                clip_geom = shape(json.loads(clip_res[0]))
-        except Exception as e:
-            logger.warning(f"Could not load clip boundary '{clip_to_layer_id}': {e}")
+    target_boundary_layer = clip_to_layer_id or "india_states"
+    resolved_clip = catalog_manager.resolve_layer_id(target_boundary_layer) or target_boundary_layer
 
-    # 4. Associate each Voronoi cell with its corresponding input seed point
+    try:
+        if clip_place_name:
+            clean_place = _clean_token(clip_place_name)
+            clip_q = f"""
+                SELECT ST_AsGeoJSON(ST_Union_Agg(geom)) as gj 
+                FROM {resolved_clip} 
+                WHERE lower(state_name) LIKE '%{clean_place}%' 
+                   OR lower(raw_state_name) LIKE '%{clean_place}%';
+            """
+        else:
+            clip_q = f"SELECT ST_AsGeoJSON(ST_Union_Agg(geom)) as gj FROM {resolved_clip} WHERE geom IS NOT NULL;"
+            
+        clip_res = spatial_engine.con.execute(clip_q).fetchone()
+        if clip_res and clip_res[0]:
+            clip_geom = shape(json.loads(clip_res[0]))
+    except Exception as e:
+        logger.warning(f"Could not load clip boundary '{clip_to_layer_id}': {e}")
+
+    # 4. Associate and Clip Voronoi Cells
     features = []
     candidate_geoms = voronoi_collection.geoms if hasattr(voronoi_collection, 'geoms') else [voronoi_collection]
 
@@ -1045,7 +1027,7 @@ def generate_voronoi_catchments(
     if not features:
         return json.dumps({"status": "error", "message": "No valid Voronoi catchment polygons generated after boundary clipping."})
 
-    # 5. Build DataFrame, register temporary view, and materialize via spatial_engine wrapper
+    # 5. Persist to DuckDB
     try:
         import pandas as pd
 
@@ -1057,11 +1039,8 @@ def generate_voronoi_catchments(
             records.append(row)
 
         df_out = pd.DataFrame(records)
-
-        # Register dataframe view
         spatial_engine.con.register("temp_voronoi_view", df_out)
 
-        # Materialize through spatial_engine's native query pipeline
         materialize_sql = """
             SELECT 
                 * EXCLUDE(wkt_geom),
@@ -1073,7 +1052,7 @@ def generate_voronoi_catchments(
             query=materialize_sql,
             output_layer_id=clean_out_id,
             layer_name=clean_out_id.replace('_', ' ').title(),
-            description=f"Voronoi (Thiessen) catchment partitions derived from {clean_in_id}"
+            description=f"Voronoi catchments clipped to {clip_place_name or resolved_clip}"
         )
 
         try:
@@ -1081,7 +1060,7 @@ def generate_voronoi_catchments(
         except Exception:
             pass
 
-        res["message"] = f"Successfully generated Voronoi catchment layer '{clean_out_id}' with {len(features)} partitions."
+        res["message"] = f"Successfully generated Voronoi catchment layer '{clean_out_id}' clipped to {clip_place_name or 'boundary'} with {len(features)} partitions."
         return json.dumps(res)
 
     except Exception as e:

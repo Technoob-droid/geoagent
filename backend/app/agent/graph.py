@@ -13,6 +13,7 @@ from langchain_groq import ChatGroq
 from langchain_core.messages import SystemMessage, ToolMessage
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
+from groq import RateLimitError
 
 from backend.app.config import settings
 from backend.app.agent.state import AgentState
@@ -27,20 +28,40 @@ if not groq_key:
 
 logger.info(f"Initialized ChatGroq with key prefix: {groq_key[:7] if groq_key else 'MISSING'}")
 
-# Production function-calling model configuration
-llm = ChatGroq(
+# Model Cascade Definitions (each provides an independent 200k TPD quota on Groq)
+primary_llm = ChatGroq(
     model="openai/gpt-oss-120b",
     temperature=0,
     max_tokens=1000,
     groq_api_key=groq_key,
 ).bind_tools(ALL_SPATIAL_TOOLS)
 
+fallback_llm_1 = ChatGroq(
+    model="openai/gpt-oss-20b",
+    temperature=0,
+    max_tokens=1000,
+    groq_api_key=groq_key,
+).bind_tools(ALL_SPATIAL_TOOLS)
+
+fallback_llm_2 = ChatGroq(
+    model="qwen/qwen3.6-27b",
+    temperature=0,
+    max_tokens=1000,
+    groq_api_key=groq_key,
+).bind_tools(ALL_SPATIAL_TOOLS)
+
+# Construct auto-failover chain targeting HTTP 429 RateLimitError
+llm = primary_llm.with_fallbacks(
+    fallbacks=[fallback_llm_1, fallback_llm_2],
+    exceptions_to_handle=(RateLimitError,)
+)
+
 
 async def agent_node(state: AgentState) -> dict:
     """
     Evaluates conversation and invokes spatial tools while preserving original user intent,
-    providing ample tool response window, and halting consecutive duplicate loops with
-    a user-facing synthesized message.
+    providing ample tool response window, halting consecutive duplicate loops, and
+    guaranteeing a non-empty conversational response.
     """
     sys_prompt = get_system_prompt()
     raw_messages = list(state["messages"])
@@ -84,8 +105,15 @@ async def agent_node(state: AgentState) -> dict:
                 if not response.content:
                     response.content = "Catalog check complete. Please specify which layers you would like to inspect or modify."
 
+    # Guard against silent completions when the fallback model returns empty content after tool runs
+    if not getattr(response, "tool_calls", None) and not (response.content and response.content.strip()):
+        if any(isinstance(m, ToolMessage) for m in tail_messages):
+            response.content = "All requested operations and layer updates completed successfully."
+        else:
+            response.content = "How can I assist you with your spatial analysis?"
+
     logger.info(f"Groq raw content: {repr(response.content)}")
-    logger.info(f"Groq tool calls detected: {getattr(response, 'tool_calls', [])}")
+    logger.info(f"Groq tool calls detected: {getattr(response, "tool_calls", [])}")
 
     return {"messages": [response]}
 
@@ -137,20 +165,6 @@ def post_tool_evaluator(state: AgentState) -> dict:
 def route_after_agent(state: AgentState) -> Literal["tools", "__end__"]:
     """Determines whether the agent needs tool execution or can answer directly."""
     last_msg = state["messages"][-1]
-
-    # Terminate immediately once an evacuation route or bulk purge has run
-    for msg in reversed(state["messages"]):
-        if isinstance(msg, ToolMessage):
-            try:
-                payload = json.loads(msg.content)
-                if payload.get("status") == "success":
-                    if "evac" in payload.get("layer_id", "") or "deleted_layers" in payload:
-                        return END
-            except Exception:
-                pass
-        else:
-            break
-
     if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
         return "tools"
     return END

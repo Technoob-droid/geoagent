@@ -6,6 +6,16 @@ from backend.app.tools.engine import spatial_engine
 
 logger = logging.getLogger("geoagent.catalog")
 
+# Protected base system layers that cannot be dropped
+PROTECTED_BASE_LAYERS = {
+    "india_states",
+    "india_districts",
+    "india_subdistricts",
+    "india_cities",
+    "india_villages",
+    "spatial_catalog"
+}
+
 # Base system catalog describing all pre-ingested administrative boundaries
 ADMIN_BOUNDARIES_CATALOG = [
     {
@@ -100,10 +110,11 @@ class CatalogManager:
                 return admin_layer
 
         try:
+            safe_lid = layer_id.replace("'", "''")
             row = self.engine.con.execute(f"""
                 SELECT layer_id, name, description, geom_type, feature_count, bbox_json, columns_json, created_at 
                 FROM spatial_catalog 
-                WHERE layer_id = '{layer_id}';
+                WHERE layer_id = '{safe_lid}';
             """).fetchone()
 
             if row:
@@ -215,7 +226,6 @@ class CatalogManager:
         """
         desc = description or f"User generated layer: {name}"
         try:
-            # Ensure spatial_catalog table exists
             self.engine.con.execute("""
                 CREATE TABLE IF NOT EXISTS spatial_catalog (
                     layer_id VARCHAR PRIMARY KEY,
@@ -229,25 +239,29 @@ class CatalogManager:
                 );
             """)
 
-            # Fetch columns from the materialized table
             cols = [
                 r[0] for r in self.engine.con.execute(
-                    f"SELECT column_name FROM information_schema.columns WHERE table_name = '{table_name}';"
+                    f"SELECT column_name FROM information_schema.columns WHERE table_name = '{table_name.replace("'", "''")}';"
                 ).fetchall()
             ]
 
-            # Upsert into spatial_catalog
+            safe_lid = layer_id.replace("'", "''")
+            safe_name = name.replace("'", "''")
+            safe_desc = desc.replace("'", "''")
+            safe_geom = geom_type.replace("'", "''")
+            cols_json = json.dumps(cols).replace("'", "''")
+
             self.engine.con.execute(f"""
-                DELETE FROM spatial_catalog WHERE layer_id = '{layer_id}';
+                DELETE FROM spatial_catalog WHERE layer_id = '{safe_lid}';
                 INSERT INTO spatial_catalog (layer_id, name, description, geom_type, feature_count, bbox_json, columns_json, created_at)
                 VALUES (
-                    '{layer_id}',
-                    '{name.replace("'", "''")}',
-                    '{desc.replace("'", "''")}',
-                    '{geom_type}',
+                    '{safe_lid}',
+                    '{safe_name}',
+                    '{safe_desc}',
+                    '{safe_geom}',
                     {feature_count},
                     NULL,
-                    '{json.dumps(cols)}',
+                    '{cols_json}',
                     CURRENT_TIMESTAMP
                 );
             """)
@@ -260,11 +274,96 @@ class CatalogManager:
         return self.register_layer(*args, **kwargs)
 
     def unregister_layer(self, layer_id: str):
-        """Removes a layer from spatial_catalog."""
+        """Removes a layer from spatial_catalog and safely drops the underlying table or view."""
+        if layer_id in PROTECTED_BASE_LAYERS:
+            logger.warning(f"Attempted to unregister protected layer '{layer_id}'. Denied.")
+            return
+
+        safe_lid = layer_id.replace("'", "''")
+        # Drop table and view in separate try blocks to prevent DuckDB Catalog Error halting execution
         try:
-            self.engine.con.execute(f"DELETE FROM spatial_catalog WHERE layer_id = '{layer_id}';")
+            self.engine.con.execute(f"DROP TABLE IF EXISTS {safe_lid};")
+        except Exception:
+            pass
+
+        try:
+            self.engine.con.execute(f"DROP VIEW IF EXISTS {safe_lid};")
+        except Exception:
+            pass
+
+        try:
+            self.engine.con.execute(f"DELETE FROM spatial_catalog WHERE layer_id = '{safe_lid}';")
+            logger.info(f"Unregistered and dropped layer: {layer_id}")
         except Exception as e:
             logger.error(f"Failed to unregister layer '{layer_id}': {e}")
+
+    def purge_layers(self, pattern_or_keywords: str) -> List[str]:
+        """
+        Purges non-core analytical layers matching wildcard '*' or comma/space-delimited keywords.
+        Safely inspects object types (TABLE vs VIEW) or drops them independently so DuckDB
+        does not throw 'Existing object is of type Table, trying to drop type View'.
+        """
+        try:
+            # 1. Fetch catalog layer entries
+            catalog_rows = self.engine.con.execute("SELECT layer_id FROM spatial_catalog;").fetchall()
+            catalog_layers = [r[0] for r in catalog_rows]
+
+            # 2. Fetch all physical DuckDB tables and views
+            db_objects = [
+                r[0] for r in self.engine.con.execute(
+                    "SELECT table_name FROM information_schema.tables WHERE table_schema = 'main';"
+                ).fetchall()
+            ]
+
+            combined = list(set(catalog_layers + db_objects))
+            targets = []
+
+            raw = pattern_or_keywords.strip().lower()
+            if raw in ("*", "all", "everything", ""):
+                targets = [lyr for lyr in combined if lyr not in PROTECTED_BASE_LAYERS]
+            else:
+                keywords = [k.strip().lower() for k in raw.replace(",", " ").split() if k.strip()]
+                for lyr in combined:
+                    if lyr in PROTECTED_BASE_LAYERS:
+                        continue
+                    if any(kw in lyr.lower() for kw in keywords):
+                        targets.append(lyr)
+
+            targets = list(set(targets))
+            deleted = []
+
+            for layer_id in targets:
+                safe_lid = layer_id.replace("'", "''")
+                dropped_successfully = False
+
+                # Drop TABLE independently
+                try:
+                    self.engine.con.execute(f"DROP TABLE IF EXISTS {safe_lid};")
+                    dropped_successfully = True
+                except Exception:
+                    pass
+
+                # Drop VIEW independently
+                try:
+                    self.engine.con.execute(f"DROP VIEW IF EXISTS {safe_lid};")
+                    dropped_successfully = True
+                except Exception:
+                    pass
+
+                # Remove from spatial_catalog
+                try:
+                    self.engine.con.execute(f"DELETE FROM spatial_catalog WHERE layer_id = '{safe_lid}';")
+                except Exception as e:
+                    logger.warning(f"Error removing metadata for {layer_id}: {e}")
+
+                if dropped_successfully:
+                    deleted.append(layer_id)
+
+            logger.info(f"Purged {len(deleted)} analytical layers: {deleted}")
+            return deleted
+        except Exception as e:
+            logger.error(f"Failed to purge layers matching '{pattern_or_keywords}': {e}")
+            return []
 
 
 catalog_manager = CatalogManager()
