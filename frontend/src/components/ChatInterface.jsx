@@ -1,5 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Send, Terminal, Layers, Sparkles, Loader2 } from 'lucide-react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import { Send, Terminal, Sparkles, Loader2 } from 'lucide-react';
 
 export default function ChatInterface({ onNewLayerDiscovered, onLayerDeleted, viewportBbox }) {
   const [prompt, setPrompt] = useState('');
@@ -127,15 +129,64 @@ export default function ChatInterface({ onNewLayerDiscovered, onLayerDeleted, vi
               className={`max-w-[85%] rounded-lg p-3 text-sm leading-relaxed ${
                 m.role === 'user'
                   ? 'bg-indigo-600 text-white shadow-md'
-                  : 'bg-slate-800 text-slate-200 border border-slate-700'
+                  : 'bg-slate-800 text-slate-200 border border-slate-700 overflow-x-auto'
               }`}
             >
-              {m.content || (isProcessing && idx === messages.length - 1 ? (
-                <div className="flex items-center space-x-2 text-slate-400">
-                  <Loader2 className="w-4 h-4 animate-spin text-indigo-400" />
-                  <span>Analyzing spatial topology...</span>
-                </div>
-              ) : null)}
+              {m.role === 'assistant' ? (
+                m.content ? (
+                  <div className="markdown-body text-xs sm:text-sm">
+                    <ReactMarkdown
+                      remarkPlugins={[remarkGfm]}
+                      components={{
+                        p: ({ node, ...props }) => <p className="mb-2 last:mb-0 leading-relaxed" {...props} />,
+                        strong: ({ node, ...props }) => <strong className="font-semibold text-sky-300" {...props} />,
+                        code: ({ node, className, children, ...props }) => {
+                          const isBlock = /language-/.test(className || '') || String(children).includes('\n');
+                          return isBlock ? (
+                            <pre className="bg-slate-950 p-2.5 rounded my-2 overflow-x-auto border border-slate-800">
+                              <code className="font-mono text-xs text-slate-300" {...props}>
+                                {children}
+                              </code>
+                            </pre>
+                          ) : (
+                            <code className="bg-slate-900/90 text-indigo-300 px-1.5 py-0.5 rounded font-mono text-xs border border-slate-700 inline-block align-baseline" {...props}>
+                              {children}
+                            </code>
+                          );
+                        },
+                        table: ({ node, ...props }) => (
+                          <div className="overflow-x-auto my-3 rounded border border-slate-700 shadow-sm">
+                            <table className="min-w-full border-collapse text-left text-xs" {...props} />
+                          </div>
+                        ),
+                        thead: ({ node, ...props }) => <thead className="bg-slate-900/90 border-b border-slate-700" {...props} />,
+                        tbody: ({ node, ...props }) => <tbody className="divide-y divide-slate-700/60 bg-slate-900/40" {...props} />,
+                        tr: ({ node, ...props }) => <tr className="hover:bg-slate-700/30 transition-colors" {...props} />,
+                        th: ({ node, ...props }) => (
+                          <th className="px-3 py-2 font-semibold text-slate-300 uppercase tracking-wider text-[11px]" {...props} />
+                        ),
+                        td: ({ node, ...props }) => (
+                          <td className="px-3 py-2 text-slate-300 font-mono" {...props} />
+                        ),
+                        ul: ({ node, ...props }) => <ul className="list-disc pl-4 space-y-1 my-2" {...props} />,
+                        ol: ({ node, ...props }) => <ol className="list-decimal pl-4 space-y-1 my-2" {...props} />,
+                        li: ({ node, ...props }) => <li className="text-slate-300" {...props} />
+                      }}
+                    >
+                      {m.content}
+                    </ReactMarkdown>
+                  </div>
+                ) : (
+                  isProcessing && idx === messages.length - 1 ? (
+                    <div className="flex items-center space-x-2 text-slate-400">
+                      <Loader2 className="w-4 h-4 animate-spin text-indigo-400" />
+                      <span>Analyzing spatial topology...</span>
+                    </div>
+                  ) : null
+                )
+              ) : (
+                <span>{m.content}</span>
+              )}
             </div>
           </div>
         ))}
