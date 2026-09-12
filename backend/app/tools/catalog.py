@@ -201,5 +201,70 @@ class CatalogManager:
         """Alias for prompt templates."""
         return self.get_catalog_summary_for_llm()
 
+    def register_layer(
+        self,
+        layer_id: str,
+        name: str,
+        table_name: str,
+        geom_type: str,
+        feature_count: int,
+        description: Optional[str] = None
+    ):
+        """
+        Registers or updates an analytical layer in the spatial_catalog table.
+        """
+        desc = description or f"User generated layer: {name}"
+        try:
+            # Ensure spatial_catalog table exists
+            self.engine.con.execute("""
+                CREATE TABLE IF NOT EXISTS spatial_catalog (
+                    layer_id VARCHAR PRIMARY KEY,
+                    name VARCHAR,
+                    description VARCHAR,
+                    geom_type VARCHAR,
+                    feature_count BIGINT,
+                    bbox_json VARCHAR,
+                    columns_json VARCHAR,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+
+            # Fetch columns from the materialized table
+            cols = [
+                r[0] for r in self.engine.con.execute(
+                    f"SELECT column_name FROM information_schema.columns WHERE table_name = '{table_name}';"
+                ).fetchall()
+            ]
+
+            # Upsert into spatial_catalog
+            self.engine.con.execute(f"""
+                DELETE FROM spatial_catalog WHERE layer_id = '{layer_id}';
+                INSERT INTO spatial_catalog (layer_id, name, description, geom_type, feature_count, bbox_json, columns_json, created_at)
+                VALUES (
+                    '{layer_id}',
+                    '{name.replace("'", "''")}',
+                    '{desc.replace("'", "''")}',
+                    '{geom_type}',
+                    {feature_count},
+                    NULL,
+                    '{json.dumps(cols)}',
+                    CURRENT_TIMESTAMP
+                );
+            """)
+            logger.info(f"Registered layer '{layer_id}' in spatial_catalog ({feature_count} features).")
+        except Exception as e:
+            logger.error(f"Failed to register layer '{layer_id}': {e}")
+
+    def add_layer(self, *args, **kwargs):
+        """Alias for register_layer to prevent naming mismatches."""
+        return self.register_layer(*args, **kwargs)
+
+    def unregister_layer(self, layer_id: str):
+        """Removes a layer from spatial_catalog."""
+        try:
+            self.engine.con.execute(f"DELETE FROM spatial_catalog WHERE layer_id = '{layer_id}';")
+        except Exception as e:
+            logger.error(f"Failed to unregister layer '{layer_id}': {e}")
+
 
 catalog_manager = CatalogManager()
