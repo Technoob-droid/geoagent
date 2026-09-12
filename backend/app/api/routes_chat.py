@@ -59,7 +59,12 @@ async def stream_agent_chat(request: ChatRequest):
         has_streamed_token = False
 
         try:
-            async for event in agent_graph.astream_events(initial_state, version="v2"):
+            # Set recursion_limit to 50 to accommodate complex multi-step spatial chains
+            async for event in agent_graph.astream_events(
+                initial_state,
+                config={"recursion_limit": 50},
+                version="v2"
+            ):
                 kind = event["event"]
 
                 # 1. Stream incremental text tokens

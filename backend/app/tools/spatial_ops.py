@@ -154,7 +154,7 @@ def _find_fuzzy_admin_entity(raw_name: str) -> Optional[Tuple[str, float, float,
         SELECT 
             city_name AS name, 
             ST_X(geom) AS lon, 
-            ST_Y(geom) AS lat,
+            ST_Y(geom) AS lat, 
             0.08 AS extent_deg
         FROM india_cities
         WHERE lower(city_name) IN ('{clean_target}', '{alias_target}')
@@ -164,7 +164,7 @@ def _find_fuzzy_admin_entity(raw_name: str) -> Optional[Tuple[str, float, float,
         SELECT 
             subdistrict_name AS name, 
             ST_X(ST_Centroid(geom)) AS lon, 
-            ST_Y(ST_Centroid(geom)) AS lat,
+            ST_Y(ST_Centroid(geom)) AS lat, 
             0.06 AS extent_deg
         FROM india_subdistricts
         WHERE lower(subdistrict_name) IN ('{clean_target}', '{alias_target}')
@@ -228,6 +228,7 @@ def _find_fuzzy_admin_entity(raw_name: str) -> Optional[Tuple[str, float, float,
         logger.warning(f"Stage 3 fuzzy lookup error: {e}")
 
     return None
+
 
 def _resolve_location_coords(location_spec: str | dict | list) -> tuple[float, float] | None:
     """Resolves arbitrary coordinate strings, lists, layer names, or landmark names to (lon, lat)."""
@@ -376,11 +377,12 @@ def filter_by_admin_boundary(
            OR lower(b.{name_col}) LIKE '%{alias_target}%';
     """
 
+    safe_place_name = place_name.replace("'", "")
     res = spatial_engine.execute_spatial_query(
         query=sql,
         output_layer_id=clean_out_id,
         layer_name=clean_out_name,
-        description=f"Features in {resolved_target} within {tier} '{place_name}'"
+        description=f"Features in {resolved_target} within {tier} {safe_place_name}"
     )
     return json.dumps(res)
 
@@ -1059,7 +1061,7 @@ def generate_voronoi_catchments(
         # Register dataframe view
         spatial_engine.con.register("temp_voronoi_view", df_out)
 
-        # Materialize through spatial_engine's native query pipeline to handle catalog registration automatically
+        # Materialize through spatial_engine's native query pipeline
         materialize_sql = """
             SELECT 
                 * EXCLUDE(wkt_geom),
@@ -1284,6 +1286,7 @@ def aggregate_catchment_metrics(
     )
     return json.dumps(res)
 
+
 @tool
 def generate_multi_ring_buffers(
     input_layer_id: str,
@@ -1379,67 +1382,3 @@ def generate_multi_ring_buffers(
         f"as '{clean_out_id}'."
     )
     return json.dumps(res)
-
-@tool
-def filter_by_admin_boundary(
-    target_layer_id: str,
-    admin_tier: str,
-    place_name: str,
-    output_layer_id: str,
-    output_layer_name: Optional[str] = None
-) -> str:
-    """
-    Filters features from a target layer (e.g. 'india_cities', 'india_villages') 
-    that fall inside a specific administrative boundary (e.g. 'Maharashtra', 'Odisha', 'Kolkata').
-    admin_tier should be 'states' or 'districts'.
-    """
-    try:
-        tier = admin_tier.lower().strip()
-        boundary_table = "india_states" if "state" in tier else "india_districts"
-        name_col = "state_name" if "state" in tier else "district_name"
-
-        clean_output_id = output_layer_id.strip().lower().replace(" ", "_")
-        disp_name = output_layer_name or clean_output_id.replace("_", " ").title()
-
-        sql = f"""
-        CREATE OR REPLACE TABLE {clean_output_id} AS
-        SELECT t.* EXCLUDE (geom), t.geom
-        FROM {target_layer_id} t
-        JOIN {boundary_table} b ON ST_Intersects(t.geom, b.geom)
-        WHERE lower(b.{name_col}) LIKE '%{place_name.lower().strip()}%';
-        """
-
-        spatial_engine.con.execute(sql)
-        count = spatial_engine.con.execute(f"SELECT COUNT(*) FROM {clean_output_id}").fetchone()[0]
-
-        if count == 0:
-            return json.dumps({
-                "status": "success",
-                "message": f"Query executed successfully, but 0 features from '{target_layer_id}' were found within '{place_name}'.",
-                "feature_count": 0
-            })
-
-        sample_row = spatial_engine.con.execute(f"SELECT ST_GeometryType(geom) FROM {clean_output_id} LIMIT 1").fetchone()
-        geom_type = sample_row[0] if sample_row else "POLYGON"
-
-        catalog_manager.add_layer(
-            layer_id=clean_output_id,
-            name=disp_name,
-            table_name=clean_output_id,
-            geom_type=geom_type,
-            feature_count=count
-        )
-
-        return json.dumps({
-            "status": "success",
-            "layer_id": clean_output_id,
-            "layer_name": disp_name,
-            "feature_count": count,
-            "geom_type": geom_type,
-            "message": f"Successfully filtered {count} features inside {place_name} into layer '{clean_output_id}'."
-        })
-    except Exception as e:
-        return json.dumps({
-            "status": "error",
-            "message": f"Failed to filter by admin boundary: {str(e)}"
-        })

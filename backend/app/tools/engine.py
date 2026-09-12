@@ -79,34 +79,37 @@ class DuckDBSpatialEngine:
         """
         Executes a spatial query, stores the result as an in-database table,
         and computes feature count and extent (bounding box in WGS84).
+        Safely sanitizes all string attributes to prevent SQL syntax errors.
         """
         try:
+            clean_layer_id = output_layer_id.strip().lower().replace(" ", "_")
+
             # Drop old table if exists and materialize output
-            self.con.execute(f"DROP TABLE IF EXISTS {output_layer_id};")
-            self.con.execute(f"CREATE TABLE {output_layer_id} AS {query};")
+            self.con.execute(f"DROP TABLE IF EXISTS {clean_layer_id};")
+            self.con.execute(f"CREATE TABLE {clean_layer_id} AS {query};")
 
             # Check feature count
-            count_res = self.con.execute(f"SELECT COUNT(*) FROM {output_layer_id};").fetchone()
+            count_res = self.con.execute(f"SELECT COUNT(*) FROM {clean_layer_id};").fetchone()
             count = count_res[0] if count_res else 0
 
             if count == 0:
                 return {
                     "status": "warning",
-                    "layer_id": output_layer_id,
+                    "layer_id": clean_layer_id,
                     "layer_name": layer_name,
                     "feature_count": 0,
-                    "message": f"Query ran successfully but produced 0 features in '{output_layer_id}'."
+                    "message": f"Query ran successfully but produced 0 features in '{clean_layer_id}'."
                 }
 
             # Inspect columns
-            cols_info = self.con.execute(f"DESCRIBE {output_layer_id};").fetchall()
+            cols_info = self.con.execute(f"DESCRIBE {clean_layer_id};").fetchall()
             columns = [c[0] for c in cols_info]
             geom_col = next((c for c in columns if c.lower() in ["geom", "geometry"]), None)
 
             if not geom_col:
                 return {
                     "status": "error",
-                    "error": f"Table '{output_layer_id}' was created but does not contain a 'geom' column."
+                    "error": f"Table '{clean_layer_id}' was created but does not contain a 'geom' column."
                 }
 
             # Extract 2D Bounding Box in WGS84
@@ -116,7 +119,7 @@ class DuckDBSpatialEngine:
                     ST_YMin(ST_Extent({geom_col})) as miny,
                     ST_XMax(ST_Extent({geom_col})) as maxx,
                     ST_YMax(ST_Extent({geom_col})) as maxy
-                FROM {output_layer_id}
+                FROM {clean_layer_id}
                 WHERE {geom_col} IS NOT NULL;
             """
             bbox_row = self.con.execute(bbox_query).fetchone()
@@ -129,28 +132,34 @@ class DuckDBSpatialEngine:
 
             # Detect geometry type (sample first row)
             geom_type_res = self.con.execute(
-                f"SELECT ST_GeometryType({geom_col}) FROM {output_layer_id} WHERE {geom_col} IS NOT NULL LIMIT 1;"
+                f"SELECT ST_GeometryType({geom_col}) FROM {clean_layer_id} WHERE {geom_col} IS NOT NULL LIMIT 1;"
             ).fetchone()
             geom_type = geom_type_res[0] if geom_type_res else "GEOMETRY"
 
-            # Register/Update in spatial catalog
+            # Escape all string values to prevent SQL injection or unescaped quote syntax errors
+            safe_name = layer_name.replace("'", "''")
+            safe_desc = (description or "").replace("'", "''")
+            bbox_str = json.dumps(bbox).replace("'", "''")
+            cols_str = json.dumps(columns).replace("'", "''")
+
+            # Register/Update in spatial catalog safely
             self.con.execute(f"""
                 INSERT OR REPLACE INTO spatial_catalog (
                     layer_id, name, description, geom_type, feature_count, bbox_json, columns_json
                 ) VALUES (
-                    '{output_layer_id}', 
-                    '{layer_name}', 
-                    '{description}', 
+                    '{clean_layer_id}', 
+                    '{safe_name}', 
+                    '{safe_desc}', 
                     '{geom_type}', 
                     {count}, 
-                    '{json.dumps(bbox)}', 
-                    '{json.dumps(columns)}'
+                    '{bbox_str}', 
+                    '{cols_str}'
                 );
             """)
 
             return {
                 "status": "success",
-                "layer_id": output_layer_id,
+                "layer_id": clean_layer_id,
                 "layer_name": layer_name,
                 "geom_type": geom_type,
                 "feature_count": count,
