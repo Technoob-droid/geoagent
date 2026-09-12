@@ -50,3 +50,23 @@ def run_spatial_sql(
         description=description
     )
     return json.dumps(res)
+
+@tool
+def run_attribute_sql(sql_query: str) -> str:
+    """
+    Executes a read-only tabular SQL query in DuckDB without requiring spatial geometries.
+    Use this for aggregations, summaries, counts, averages, and group-by reports.
+    """
+    try:
+        df = spatial_engine.con.execute(sql_query).df()
+        records = df.to_dict(orient="records")
+        return json.dumps({
+            "status": "success",
+            "row_count": len(records),
+            "data": records
+        })
+    except Exception as e:
+        return json.dumps({
+            "status": "error",
+            "message": f"Attribute SQL error: {str(e)}"
+        })
