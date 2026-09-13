@@ -33,6 +33,14 @@ GENERIC_NOUN_LAYER_MAP = {
     "tehsil": "india_subdistricts",
     "taluks": "india_subdistricts",
     "taluk": "india_subdistricts",
+    "power_plants": "utility_generation",
+    "generation": "utility_generation",
+    "generators": "utility_generation",
+    "transmission_lines": "utility_transmission_lines",
+    "transmission": "utility_transmission_lines",
+    "grid_lines": "utility_transmission_lines",
+    "substations": "utility_substations",
+    "substation": "utility_substations",
 }
 
 CARDINAL_OFFSETS = {
@@ -121,7 +129,7 @@ def _find_fuzzy_admin_entity(raw_name: str) -> Optional[Tuple[str, float, float,
     alias_target = INDIAN_PLACE_ALIASES.get(clean_target, clean_target)
     prefix_target = clean_target[:4] if len(clean_target) >= 4 else clean_target
 
-    # Stage 1: Exact, Alias, and Substring SQL Lookup (india_cities prioritized over subdistricts)
+    # Stage 1: Exact, Alias, and Substring SQL Lookup
     sql_exact = f"""
         SELECT 
             city_name AS name, 
@@ -172,7 +180,7 @@ def _find_fuzzy_admin_entity(raw_name: str) -> Optional[Tuple[str, float, float,
     except Exception as e:
         logger.warning(f"Stage 1 exact lookup error: {e}")
 
-    # Stage 2: Prefix Matching (Cities prioritized)
+    # Stage 2: Prefix Matching
     if len(prefix_target) >= 3:
         sql_prefix = f"""
             SELECT city_name AS name, ST_X(geom) AS lon, ST_Y(geom) AS lat, 0.08 AS extent_deg
@@ -192,7 +200,7 @@ def _find_fuzzy_admin_entity(raw_name: str) -> Optional[Tuple[str, float, float,
         except Exception as e:
             logger.warning(f"Stage 2 prefix lookup error: {e}")
 
-    # Stage 3: Python Fuzzy Fallback across City and District indices (Cities prioritized)
+    # Stage 3: Python Fuzzy Fallback
     try:
         cities = [r[0] for r in spatial_engine.con.execute("SELECT city_name FROM india_cities WHERE city_name IS NOT NULL").fetchall() if r and len(r) > 0]
         districts = [r[0] for r in spatial_engine.con.execute("SELECT district_name FROM india_districts WHERE district_name IS NOT NULL").fetchall() if r and len(r) > 0]
@@ -241,7 +249,6 @@ def _resolve_location_coords(location_spec: str | dict | list) -> tuple[float, f
         clean_tbl_cand = clean_name.replace(" ", "_")
         active_layers = [l["layer_id"] for l in catalog_manager.list_layers()]
 
-        # 1. Match directly against user analytical layer names
         for tbl in active_layers:
             if tbl in SYSTEM_ADMIN_LAYERS:
                 continue
@@ -256,7 +263,6 @@ def _resolve_location_coords(location_spec: str | dict | list) -> tuple[float, f
                 except Exception:
                     pass
 
-        # 2. Match feature attributes across user-generated layers
         for tbl in active_layers:
             if tbl in SYSTEM_ADMIN_LAYERS:
                 continue
@@ -270,7 +276,6 @@ def _resolve_location_coords(location_spec: str | dict | list) -> tuple[float, f
             except Exception:
                 continue
 
-        # 3. Fuzzy entity resolution across administrative datasets
         resolved = _find_fuzzy_admin_entity(cleaned)
         if resolved:
             return resolved[1], resolved[2]
@@ -317,7 +322,7 @@ def filter_by_admin_boundary(
 ) -> str:
     """
     Spatially filters entities from target_layer_id that fall inside a specific administrative boundary.
-    Automatically handles generic nouns ('cities', 'villages') and historical name spellings.
+    Automatically handles generic nouns ('cities', 'villages', 'substations') and historical name spellings.
     """
     raw_norm = target_layer_id.strip().lower()
     candidate_target = GENERIC_NOUN_LAYER_MAP.get(raw_norm, target_layer_id)
@@ -330,7 +335,6 @@ def filter_by_admin_boundary(
             "message": f"Target layer '{target_layer_id}' could not be resolved to an active dataset."
         })
 
-    # Normalize tier (handle 'state'/'states', 'district'/'districts', etc.)
     t = admin_tier.lower().strip()
     if t in ("state", "states"):
         tier = "states"
@@ -358,7 +362,7 @@ def filter_by_admin_boundary(
     alias_target = INDIAN_PLACE_ALIASES.get(clean_target, clean_target)
 
     clean_out_id = output_layer_id.strip().lower().replace(" ", "_") if output_layer_id else f"{clean_target}_{resolved_target}"
-    clean_out_name = output_layer_name or f"{place_name.title()} {resolved_target.replace('india_', '').title()}"
+    clean_out_name = output_layer_name or f"{place_name.title()} {resolved_target.replace('india_', '').replace('utility_', '').title()}"
 
     sql = f"""
         SELECT 
@@ -727,7 +731,6 @@ def calculate_evacuation_route(
             hazard_intersect_count = spatial_engine.con.execute(check_sql).fetchone()[0]
             intersects_hazard = hazard_intersect_count > 0
 
-            # Detour sampling if primary path intersects hazard
             if intersects_hazard:
                 extent_info = spatial_engine.con.execute(f"""
                     SELECT 
@@ -891,7 +894,6 @@ def synthesize_regional_hazard_zones(
     out_id = output_layer_id or f"{slug}_{hazard_type}_zones"
     out_name = output_layer_name or f"{name} High {hazard_type.capitalize()} Risk Zones"
 
-    # Derive multi-corridor hazard zones (primary drainage and coastal/lowland corridor)
     sql = f"""
         WITH hazard_lines AS (
             SELECT ST_GeomFromText('LINESTRING({c_lon - ext*0.5} {c_lat - ext*0.9}, {c_lon} {c_lat}, {c_lon + ext*0.4} {c_lat + ext*0.8})') AS geom,
@@ -925,19 +927,12 @@ def generate_voronoi_catchments(
 ) -> str:
     """
     Generates Voronoi (Thiessen) catchment polygons around a point layer, clipped to an administrative boundary.
-
-    Args:
-        input_layer_id: ID of the point layer containing seed sites.
-        output_layer_id: Unique ID for the resulting polygon catchment layer.
-        clip_to_layer_id: Polygon layer ID to clip Voronoi boundaries (default: 'india_states').
-        clip_place_name: Specific state or district name to clip to (e.g. 'Tamil Nadu').
     """
     raw_norm = input_layer_id.strip().lower()
     candidate_in = GENERIC_NOUN_LAYER_MAP.get(raw_norm, input_layer_id)
     clean_in_id = _clean_token(candidate_in).replace(" ", "_")
     clean_out_id = _clean_token(output_layer_id).replace(" ", "_")
 
-    # 1. Fetch points from input layer
     try:
         resolved_in_id = catalog_manager.resolve_layer_id(clean_in_id) or clean_in_id
         query_pts = f"SELECT ST_AsGeoJSON(geom) as gj, * EXCLUDE(geom) FROM {resolved_in_id} WHERE geom IS NOT NULL;"
@@ -964,12 +959,10 @@ def generate_voronoi_catchments(
     if len(shapely_pts) < 2:
         return json.dumps({"status": "error", "message": f"Voronoi partitioning requires at least 2 points. Found {len(shapely_pts)}."})
 
-    # 2. Compute Voronoi diagrams via Shapely
     multi_pt = MultiPoint(shapely_pts)
     env = multi_pt.envelope.buffer(0.5)
     voronoi_collection = voronoi_diagram(multi_pt, envelope=env)
 
-    # 3. Resolve Clipping Geometry
     clip_geom = None
     target_boundary_layer = clip_to_layer_id or "india_states"
     resolved_clip = catalog_manager.resolve_layer_id(target_boundary_layer) or target_boundary_layer
@@ -992,7 +985,6 @@ def generate_voronoi_catchments(
     except Exception as e:
         logger.warning(f"Could not load clip boundary '{clip_to_layer_id}': {e}")
 
-    # 4. Associate and Clip Voronoi Cells
     features = []
     candidate_geoms = voronoi_collection.geoms if hasattr(voronoi_collection, 'geoms') else [voronoi_collection]
 
@@ -1027,7 +1019,6 @@ def generate_voronoi_catchments(
     if not features:
         return json.dumps({"status": "error", "message": "No valid Voronoi catchment polygons generated after boundary clipping."})
 
-    # 5. Persist to DuckDB
     try:
         import pandas as pd
 
@@ -1082,12 +1073,6 @@ def generate_isochrone_reachability(
     """
     Generates a reachable travel time isochrone polygon (catchment area) around a location
     using OSRM road network matrix calculations.
-
-    Args:
-        center_location: Name of city/district, coordinates ("lon, lat"), or a point layer ID.
-        travel_time_minutes: Maximum driving travel time cutoff in minutes (default: 15).
-        output_layer_id: Unique ID for the resulting polygon layer.
-        output_layer_name: Human-readable name for the map layer.
     """
     coords = _resolve_location_coords(center_location)
     if not coords:
@@ -1099,7 +1084,6 @@ def generate_isochrone_reachability(
     c_lon, c_lat = coords
     max_duration_sec = travel_time_minutes * 60.0
 
-    # 1. Project radial candidate waypoints around the center (16 bearings at 4 distance tiers)
     est_max_dist_km = (travel_time_minutes / 60.0) * 45.0
     deg_radius = est_max_dist_km / 111.32
 
@@ -1115,7 +1099,6 @@ def generate_isochrone_reachability(
             dy = r * math.cos(rad)
             probe_coords.append((round(c_lon + dx, 6), round(c_lat + dy, 6)))
 
-    # 2. Query OSRM Table Service (1 origin -> many destinations)
     coord_payload = f"{c_lon},{c_lat};" + ";".join(f"{lon},{lat}" for lon, lat in probe_coords)
     osrm_url = f"https://router.project-osrm.org/table/v1/driving/{coord_payload}?sources=0"
 
@@ -1133,14 +1116,12 @@ def generate_isochrone_reachability(
     except Exception as e:
         logger.warning(f"OSRM Table Matrix query failed, falling back to network estimate: {e}")
 
-    # Fallback to buffer envelope if OSRM service is unreachable or sparse
     if len(reachable_points) < 4:
         hull_geom = Point(c_lon, c_lat).buffer(deg_radius * 0.75)
     else:
         mp = MultiPoint(reachable_points)
         hull_geom = mp.convex_hull.buffer(deg_radius * 0.12)
 
-    # 3. Clean IDs and register into DuckDB via spatial_engine wrapper
     slug_name = _clean_token(center_location).replace(" ", "_") if isinstance(center_location, str) else "hub"
     clean_out_id = output_layer_id or f"{slug_name}_{int(travel_time_minutes)}min_isochrone"
     clean_out_name = output_layer_name or f"{center_location} {int(travel_time_minutes)}-Min Reachability"
@@ -1203,14 +1184,6 @@ def aggregate_catchment_metrics(
     """
     Spatially aggregates points or features from target_layer_id falling inside each polygon 
     of catchment_layer_id (Voronoi partitions, isochrones, or districts).
-    
-    Args:
-        catchment_layer_id: The polygon layer defining boundary zones.
-        target_layer_id: The layer to summarize within each polygon.
-        output_layer_id: Unique ID for the resulting polygon layer with metric attributes.
-        output_layer_name: User-facing name for the map layer.
-        metric_column: Optional numeric attribute to aggregate (e.g., 'population', 'risk_score').
-        aggregation_type: Type of aggregation: 'count', 'sum', 'avg', 'min', or 'max' (default: 'count').
     """
     resolved_catchment = catalog_manager.resolve_layer_id(catchment_layer_id)
     if not resolved_catchment:
@@ -1226,7 +1199,6 @@ def aggregate_catchment_metrics(
     clean_out_id = output_layer_id.strip().lower().replace(" ", "_") if output_layer_id else f"{resolved_catchment}_agg_{resolved_target}"
     clean_out_name = output_layer_name or f"{resolved_catchment} Aggregated with {resolved_target}"
 
-    # Determine numeric aggregate expression
     agg_op = aggregation_type.strip().lower()
     agg_select = "count(t.geom) AS feature_count"
     
@@ -1276,13 +1248,6 @@ def generate_multi_ring_buffers(
 ) -> str:
     """
     Generates concentric multi-ring buffer bands around points, lines, or polygons.
-    
-    Args:
-        input_layer_id: The source layer to buffer (or generic noun like 'cities').
-        distances_meters: Comma-separated list of ascending buffer distances in meters (e.g., '500, 1000, 2000').
-        output_layer_id: Unique identifier for the resulting polygonal band layer.
-        output_layer_name: Human-readable label for UI and map display.
-        create_donuts: If True, rings are hollow donut polygons (non-overlapping).
     """
     raw_norm = input_layer_id.strip().lower()
     candidate_in = GENERIC_NOUN_LAYER_MAP.get(raw_norm, input_layer_id)
@@ -1361,3 +1326,138 @@ def generate_multi_ring_buffers(
         f"as '{clean_out_id}'."
     )
     return json.dumps(res)
+
+
+@tool
+def trace_utility_upstream(
+    substation_id: str,
+    output_layer_id: str,
+    output_layer_name: Optional[str] = None,
+    tolerance_meters: float = 1000.0
+) -> str:
+    """
+    Traces upstream from a distribution substation to identify serving transmission lines
+    and the source power generation facility.
+    """
+    safe_out = output_layer_id.strip().lower().replace(" ", "_")
+    layer_name = output_layer_name or f"Upstream Trace for {substation_id}"
+    safe_sub_id = substation_id.strip().replace("'", "''")
+
+    try:
+        sub_check = spatial_engine.con.execute(f"""
+            SELECT substation_id, substation_name 
+            FROM utility_substations 
+            WHERE lower(substation_id) = lower('{safe_sub_id}') 
+               OR lower(substation_name) LIKE lower('%{safe_sub_id}%');
+        """).fetchone()
+
+        if not sub_check:
+            return json.dumps({
+                "status": "error",
+                "message": f"Substation '{substation_id}' not found in utility_substations."
+            })
+
+        resolved_sub_id = sub_check[0]
+        deg_tolerance = tolerance_meters / 111320.0
+
+        sql_trace = f"""
+            WITH target_sub AS (
+                SELECT geom FROM utility_substations WHERE substation_id = '{resolved_sub_id}'
+            ),
+            connected_tx AS (
+                SELECT tx.line_id, tx.line_name, tx.voltage_kv, tx.source_facility_id, tx.geom, 'Transmission' AS asset_type
+                FROM utility_transmission_lines tx, target_sub s
+                WHERE ST_DWithin(tx.geom, s.geom, {deg_tolerance})
+            ),
+            source_gen AS (
+                SELECT g.facility_id AS asset_id, g.facility_name AS asset_name, g.capacity_mw AS rating, g.fuel_type AS details, g.geom, 'Generation' AS asset_type
+                FROM utility_generation g
+                WHERE g.facility_id IN (SELECT source_facility_id FROM connected_tx)
+            )
+            SELECT line_id AS asset_id, line_name AS asset_name, CAST(voltage_kv AS DOUBLE) AS rating, 'kV' AS details, asset_type, geom
+            FROM connected_tx
+            UNION ALL
+            SELECT asset_id, asset_name, rating, details, asset_type, geom
+            FROM source_gen;
+        """
+
+        res = spatial_engine.execute_spatial_query(
+            query=sql_trace,
+            output_layer_id=safe_out,
+            layer_name=layer_name,
+            description=f"Upstream infrastructure tracing feed for substation {resolved_sub_id}."
+        )
+
+        res["substation_id"] = resolved_sub_id
+        res["message"] = f"Successfully traced upstream grid for {resolved_sub_id}. Created layer '{safe_out}' with {res.get('feature_count', 0)} connected assets."
+        return json.dumps(res)
+
+    except Exception as e:
+        logger.error(f"Upstream trace failed: {e}")
+        return json.dumps({"status": "error", "message": str(e)})
+
+
+@tool
+def trace_utility_downstream(
+    generation_facility_id: str,
+    output_layer_id: str,
+    output_layer_name: Optional[str] = None,
+    tolerance_meters: float = 1000.0
+) -> str:
+    """
+    Traces downstream from a power generation facility to identify connected
+    transmission corridors and receiving distribution substations.
+    """
+    safe_out = output_layer_id.strip().lower().replace(" ", "_")
+    layer_name = output_layer_name or f"Downstream Grid for {generation_facility_id}"
+    safe_gen_id = generation_facility_id.strip().replace("'", "''")
+
+    try:
+        gen_check = spatial_engine.con.execute(f"""
+            SELECT facility_id, facility_name 
+            FROM utility_generation 
+            WHERE lower(facility_id) = lower('{safe_gen_id}') 
+               OR lower(facility_name) LIKE lower('%{safe_gen_id}%');
+        """).fetchone()
+
+        if not gen_check:
+            return json.dumps({
+                "status": "error",
+                "message": f"Generation facility '{generation_facility_id}' not found."
+            })
+
+        resolved_gen_id = gen_check[0]
+        deg_tolerance = tolerance_meters / 111320.0
+
+        sql_trace = f"""
+            WITH out_tx AS (
+                SELECT line_id, line_name, voltage_kv, geom
+                FROM utility_transmission_lines
+                WHERE source_facility_id = '{resolved_gen_id}'
+            ),
+            fed_subs AS (
+                SELECT s.substation_id, s.substation_name, s.capacity_mva, s.voltage_ratio, s.geom
+                FROM utility_substations s, out_tx tx
+                WHERE ST_DWithin(s.geom, tx.geom, {deg_tolerance})
+            )
+            SELECT line_id AS asset_id, line_name AS asset_name, CAST(voltage_kv AS DOUBLE) AS capacity, 'Transmission' AS asset_type, geom
+            FROM out_tx
+            UNION ALL
+            SELECT substation_id AS asset_id, substation_name AS asset_name, capacity_mva AS capacity, 'Substation' AS asset_type, geom
+            FROM fed_subs;
+        """
+
+        res = spatial_engine.execute_spatial_query(
+            query=sql_trace,
+            output_layer_id=safe_out,
+            layer_name=layer_name,
+            description=f"Downstream distribution footprint for generation plant {resolved_gen_id}."
+        )
+
+        res["facility_id"] = resolved_gen_id
+        res["message"] = f"Successfully mapped downstream grid for {resolved_gen_id}. Created layer '{safe_out}' with {res.get('feature_count', 0)} connected assets."
+        return json.dumps(res)
+
+    except Exception as e:
+        logger.error(f"Downstream trace failed: {e}")
+        return json.dumps({"status": "error", "message": str(e)})

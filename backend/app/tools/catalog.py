@@ -13,10 +13,13 @@ PROTECTED_BASE_LAYERS = {
     "india_subdistricts",
     "india_cities",
     "india_villages",
+    "utility_generation",
+    "utility_transmission_lines",
+    "utility_substations",
     "spatial_catalog"
 }
 
-# Base system catalog describing all pre-ingested administrative boundaries
+# Base system catalog describing all pre-ingested administrative boundaries & utilities
 ADMIN_BOUNDARIES_CATALOG = [
     {
         "layer_id": "india_states",
@@ -62,6 +65,33 @@ ADMIN_BOUNDARIES_CATALOG = [
         "feature_count": 557995,
         "columns": ["village_name", "raw_name", "state_code", "feature_code", "geom"],
         "is_system": True
+    },
+    {
+        "layer_id": "utility_generation",
+        "name": "Power Generation Plants",
+        "description": "Power generation facilities, fuel sources (Thermal, Hydro), and capacity in MW.",
+        "geom_type": "POINT",
+        "feature_count": 5,
+        "columns": ["facility_id", "facility_name", "fuel_type", "capacity_mw", "geom"],
+        "is_system": True
+    },
+    {
+        "layer_id": "utility_transmission_lines",
+        "name": "High-Voltage Transmission Corridors",
+        "description": "High-voltage electricity transmission lines and grid corridors (kV ratings).",
+        "geom_type": "LINESTRING",
+        "feature_count": 3,
+        "columns": ["line_id", "line_name", "voltage_kv", "source_facility_id", "geom"],
+        "is_system": True
+    },
+    {
+        "layer_id": "utility_substations",
+        "name": "Distribution Substations",
+        "description": "Distribution substations, step-down voltage ratios, and district allocations.",
+        "geom_type": "POINT",
+        "feature_count": 5,
+        "columns": ["substation_id", "substation_name", "voltage_ratio", "district", "capacity_mva", "geom"],
+        "is_system": True
     }
 ]
 
@@ -72,15 +102,15 @@ class CatalogManager:
 
     def list_layers(self) -> List[Dict[str, Any]]:
         """
-        Lists all available layers, merging base administrative boundary layers
+        Lists all available layers, merging base administrative/utility layers
         with user-generated analytical layers stored in spatial_catalog.
         """
         layers = list(ADMIN_BOUNDARIES_CATALOG)
 
         try:
             rows = self.engine.con.execute("""
-                SELECT layer_id, name, description, geom_type, feature_count, bbox_json, columns_json, created_at 
-                FROM spatial_catalog 
+                SELECT layer_id, name, description, geom_type, feature_count, bbox_json, columns_json, created_at
+                FROM spatial_catalog
                 ORDER BY created_at DESC;
             """).fetchall()
 
@@ -112,8 +142,8 @@ class CatalogManager:
         try:
             safe_lid = layer_id.replace("'", "''")
             row = self.engine.con.execute(f"""
-                SELECT layer_id, name, description, geom_type, feature_count, bbox_json, columns_json, created_at 
-                FROM spatial_catalog 
+                SELECT layer_id, name, description, geom_type, feature_count, bbox_json, columns_json, created_at
+                FROM spatial_catalog
                 WHERE layer_id = '{safe_lid}';
             """).fetchone()
 
@@ -192,8 +222,10 @@ class CatalogManager:
             return "No analytical layers active."
 
         analytical_layers = [
-            l for l in all_layers 
-            if not l.get("is_system", False) and not l["layer_id"].startswith("india_")
+            l for l in all_layers
+            if not l.get("is_system", False) 
+            and not l["layer_id"].startswith("india_")
+            and not l["layer_id"].startswith("utility_")
         ]
 
         if not analytical_layers:
@@ -280,7 +312,6 @@ class CatalogManager:
             return
 
         safe_lid = layer_id.replace("'", "''")
-        # Drop table and view in separate try blocks to prevent DuckDB Catalog Error halting execution
         try:
             self.engine.con.execute(f"DROP TABLE IF EXISTS {safe_lid};")
         except Exception:

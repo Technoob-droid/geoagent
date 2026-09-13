@@ -1,9 +1,9 @@
 import React, { useState, useRef, useEffect } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { Send, Terminal, Sparkles, Loader2 } from 'lucide-react';
+import { Send, Terminal, Sparkles, Loader2, PlusCircle } from 'lucide-react';
 
-export default function ChatInterface({ onNewLayerDiscovered, onLayerDeleted, viewportBbox }) {
+export default function ChatInterface({ onNewLayerDiscovered, onLayerDeleted, onClearChat, viewportBbox }) {
   const [prompt, setPrompt] = useState('');
   const [messages, setMessages] = useState([
     {
@@ -18,6 +18,20 @@ export default function ChatInterface({ onNewLayerDiscovered, onLayerDeleted, vi
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, toolLogs]);
+
+  const handleNewChatClick = async () => {
+    if (isProcessing) return;
+    setMessages([
+      {
+        role: 'assistant',
+        content: 'New session started. All prior context cleared. What analysis would you like to run?'
+      }
+    ]);
+    setToolLogs([]);
+    if (onClearChat) {
+      onClearChat();
+    }
+  };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -111,9 +125,19 @@ export default function ChatInterface({ onNewLayerDiscovered, onLayerDeleted, vi
             GeoAgent Console
           </h1>
         </div>
-        <span className="text-xs px-2 py-0.5 rounded-full bg-emerald-950 text-emerald-400 border border-emerald-800">
-          Spatial Engine Active
-        </span>
+        <div className="flex items-center space-x-2">
+          <button
+            onClick={handleNewChatClick}
+            title="Start New Chat & Clear Console"
+            className="flex items-center space-x-1 text-xs px-2.5 py-1 rounded-md bg-indigo-950 text-indigo-300 border border-indigo-800 hover:bg-indigo-900 transition cursor-pointer"
+          >
+            <PlusCircle className="w-3.5 h-3.5" />
+            <span>New Chat</span>
+          </button>
+          <span className="text-xs px-2 py-0.5 rounded-full bg-emerald-950 text-emerald-400 border border-emerald-800">
+            Spatial Engine Active
+          </span>
+        </div>
       </div>
 
       {/* Messages */}
@@ -230,7 +254,7 @@ export default function ChatInterface({ onNewLayerDiscovered, onLayerDeleted, vi
           <button
             type="submit"
             disabled={isProcessing || !prompt.trim()}
-            className="absolute right-1.5 top-1.5 bottom-1.5 px-3 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white rounded transition flex items-center justify-center"
+            className="absolute right-1.5 top-1.5 bottom-1.5 px-3 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white rounded transition flex items-center justify-center cursor-pointer"
           >
             <Send className="w-3.5 h-3.5" />
           </button>

@@ -30,6 +30,42 @@ export default function App() {
       .catch((err) => console.error('Failed to fetch layers:', err));
   }, []);
 
+const handleClearChat = async () => {
+    try {
+      // 1. Purge analytical layers on the backend DuckDB instance
+      await fetch('/api/layers/purge', { method: 'DELETE' });
+
+      // 2. Fetch the remaining base catalog layers rather than zeroing out state
+      const res = await fetch('/api/layers');
+      const remainingLayers = await res.json();
+
+      if (Array.isArray(remainingLayers)) {
+        setLayers(remainingLayers);
+
+        const retainedOpacities = {};
+        const retainedModes = {};
+        remainingLayers.forEach((l) => {
+          retainedOpacities[l.layer_id] = opacities[l.layer_id] ?? 0.75;
+          retainedModes[l.layer_id] = displayModes[l.layer_id] ?? 'points';
+        });
+
+        setOpacities(retainedOpacities);
+        setDisplayModes(retainedModes);
+
+        // Retain hidden states only for existing layers
+        setHiddenLayers((prev) => {
+          const next = new Set();
+          remainingLayers.forEach((l) => {
+            if (prev.has(l.layer_id)) next.add(l.layer_id);
+          });
+          return next;
+        });
+      }
+    } catch (err) {
+      console.error('Failed to clear analytical layers:', err);
+    }
+  };
+
   const handleNewLayer = (newLayer) => {
     setLayers((prev) => {
       const exists = prev.some((l) => l.layer_id === newLayer.layer_id);
@@ -146,6 +182,7 @@ export default function App() {
         <ChatInterface
           onNewLayerDiscovered={handleNewLayer}
           onLayerDeleted={handleDeleteLayer}
+          onClearChat={handleClearChat}
           viewportBbox={viewportBbox}
         />
       </div>
