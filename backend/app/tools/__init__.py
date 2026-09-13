@@ -17,6 +17,8 @@ from backend.app.tools.spatial_ops import (
     generate_multi_ring_buffers,
     trace_utility_upstream,
     trace_utility_downstream,
+    simulate_grid_outage,
+    filter_utility_network,
 )
 from backend.app.tools.sql_runner import run_attribute_sql, run_spatial_sql
 
@@ -39,6 +41,8 @@ ALL_SPATIAL_TOOLS = [
     generate_multi_ring_buffers,
     trace_utility_upstream,
     trace_utility_downstream,
+    simulate_grid_outage,
+    filter_utility_network,
     run_spatial_sql,
     run_attribute_sql,
 ]
@@ -63,6 +67,8 @@ __all__ = [
     "generate_multi_ring_buffers",
     "trace_utility_upstream",
     "trace_utility_downstream",
+    "simulate_grid_outage",
+    "filter_utility_network",
     "run_spatial_sql",
     "run_attribute_sql",
 ]

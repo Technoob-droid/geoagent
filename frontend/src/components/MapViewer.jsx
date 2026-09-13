@@ -615,6 +615,8 @@ export default function MapViewer({
             `${id}-polygon-fill`,
             `${id}-polygon-stroke`,
             `${id}-line`,
+            `${id}-collection-lines`,
+            `${id}-collection-points`,
             `${id}-point-circle`,
             `${id}-vector-points`,
             `${id}-cluster-circles`,
@@ -720,17 +722,66 @@ export default function MapViewer({
               if (!res.ok) continue;
               const data = await res.json();
 
+              // Inspect feature types in dataset
+              const featureTypes = new Set(
+                (data.features || []).map(f => f.geometry?.type).filter(Boolean)
+              );
+              let activeGeom = geomType;
+              if (featureTypes.has('LineString') && featureTypes.has('Point')) {
+                activeGeom = 'GEOMETRYCOLLECTION';
+              } else if (featureTypes.has('LineString') || featureTypes.has('MultiLineString')) {
+                if (!featureTypes.has('Polygon') && !featureTypes.has('MultiPolygon')) {
+                  activeGeom = 'LINESTRING';
+                }
+              }
+
               if (!map.getSource(layerId)) {
                 map.addSource(layerId, {
                   type: 'geojson',
                   data,
-                  cluster: isPoint,
+                  cluster: isPoint && activeGeom !== 'GEOMETRYCOLLECTION',
                   clusterRadius: 50,
                   clusterMaxZoom: 14
                 });
               }
 
               if (isPoint) {
+                const isSubstationMaster = layerId.toLowerCase().includes('substation');
+                const isSwitchgearMaster = layerId.toLowerCase().includes('switchgear');
+
+                const circleColorExpr = isSubstationMaster
+                  ? [
+                      'match',
+                      ['coalesce', ['get', 'tier'], ''],
+                      'GSS', '#e11d48',
+                      'PSS', '#f59e0b',
+                      'DSS', '#10b981',
+                      color.fill
+                    ]
+                  : isSwitchgearMaster
+                  ? [
+                      'match',
+                      ['coalesce', ['get', 'status'], ''],
+                      'CLOSED', '#10b981',
+                      'OPEN', '#ef4444',
+                      'TRIPPED', '#f97316',
+                      color.fill
+                    ]
+                  : color.fill;
+
+                const circleRadiusExpr = isSubstationMaster
+                  ? [
+                      'match',
+                      ['coalesce', ['get', 'tier'], ''],
+                      'GSS', 9,
+                      'PSS', 6.5,
+                      'DSS', 4.5,
+                      8
+                    ]
+                  : isSwitchgearMaster
+                  ? 5.5
+                  : 8;
+
                 if (!map.getLayer(`${layerId}-point-circle`)) {
                   map.addLayer({
                     id: `${layerId}-point-circle`,
@@ -739,8 +790,8 @@ export default function MapViewer({
                     filter: ['!', ['has', 'point_count']],
                     layout: { visibility: !isHidden && mode === 'points' ? 'visible' : 'none' },
                     paint: {
-                      'circle-radius': 8,
-                      'circle-color': color.fill,
+                      'circle-radius': circleRadiusExpr,
+                      'circle-color': circleColorExpr,
                       'circle-stroke-width': 2,
                       'circle-stroke-color': '#ffffff',
                       'circle-opacity': alpha
@@ -823,7 +874,37 @@ export default function MapViewer({
                     }
                   });
                 }
-              } else if (geomType === 'LINESTRING' || geomType === 'MULTILINESTRING') {
+              } else if (activeGeom === 'LINESTRING' || activeGeom === 'MULTILINESTRING') {
+                const isFeederMaster = layerId.toLowerCase().includes('feeder');
+
+                const lineColorExpr = isFeederMaster
+                  ? [
+                      'match',
+                      ['coalesce', ['get', 'feeder_type'], ''],
+                      'INTER_STATE_TRUNK', '#a855f7',
+                      'SUB_TRANSMISSION', '#f59e0b',
+                      'PRIMARY_DISTRIBUTION', '#06b6d4',
+                      color.stroke
+                    ]
+                  : [
+                      'match',
+                      ['coalesce', ['get', 'impact_status'], ''],
+                      'SEVERED_TRANSMISSION', '#ff3344',
+                      'FAILED_CORRIDOR', '#ff3344',
+                      color.stroke
+                    ];
+
+                const lineWidthExpr = isFeederMaster
+                  ? [
+                      'match',
+                      ['coalesce', ['get', 'feeder_type'], ''],
+                      'INTER_STATE_TRUNK', 4,
+                      'SUB_TRANSMISSION', 2.5,
+                      'PRIMARY_DISTRIBUTION', 1.5,
+                      3
+                    ]
+                  : 3.5;
+
                 if (!map.getLayer(`${layerId}-line`)) {
                   map.addLayer({
                     id: `${layerId}-line`,
@@ -831,9 +912,53 @@ export default function MapViewer({
                     source: layerId,
                     layout: { visibility: isHidden ? 'none' : 'visible' },
                     paint: {
-                      'line-color': color.stroke,
-                      'line-width': 3,
+                      'line-color': lineColorExpr,
+                      'line-width': lineWidthExpr,
                       'line-opacity': alpha
+                    }
+                  });
+                }
+              } else if (activeGeom === 'GEOMETRYCOLLECTION' || activeGeom === 'GEOMETRY') {
+                if (!map.getLayer(`${layerId}-collection-lines`)) {
+                  map.addLayer({
+                    id: `${layerId}-collection-lines`,
+                    type: 'line',
+                    source: layerId,
+                    filter: ['==', '$type', 'LineString'],
+                    layout: { visibility: isHidden ? 'none' : 'visible' },
+                    paint: {
+                      'line-color': [
+                        'match',
+                        ['coalesce', ['get', 'impact_status'], ''],
+                        'SEVERED_TRANSMISSION', '#ff3344',
+                        'FAILED_CORRIDOR', '#ff3344',
+                        '#ff5555'
+                      ],
+                      'line-width': 4.5,
+                      'line-dasharray': [2, 2],
+                      'line-opacity': 1.0
+                    }
+                  });
+                }
+
+                if (!map.getLayer(`${layerId}-collection-points`)) {
+                  map.addLayer({
+                    id: `${layerId}-collection-points`,
+                    type: 'circle',
+                    source: layerId,
+                    filter: ['==', '$type', 'Point'],
+                    layout: { visibility: isHidden ? 'none' : 'visible' },
+                    paint: {
+                      'circle-radius': 9,
+                      'circle-color': [
+                        'match',
+                        ['coalesce', ['get', 'impact_status'], ''],
+                        'DE_ENERGIZED', '#ff1744',
+                        '#ff1744'
+                      ],
+                      'circle-stroke-width': 2.5,
+                      'circle-stroke-color': '#ffffff',
+                      'circle-opacity': 1.0
                     }
                   });
                 }
@@ -1062,8 +1187,8 @@ export default function MapViewer({
       const areaKm2 = calculatePolygonArea(measurePoints);
       setMeasureResult(
         areaKm2 >= 1
-          ? `${areaKm2.toFixed(2)} km²`
-          : `${(areaKm2 * 1000000).toLocaleString(undefined, { maximumFractionDigits: 0 })} m²`
+          ? `${areaKm2.toFixed(2)} kmÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â²`
+          : `${(areaKm2 * 1000000).toLocaleString(undefined, { maximumFractionDigits: 0 })} mÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â²`
       );
     } else {
       setMeasureResult(null);

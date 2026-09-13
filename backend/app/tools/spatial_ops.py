@@ -1461,3 +1461,224 @@ def trace_utility_downstream(
     except Exception as e:
         logger.error(f"Downstream trace failed: {e}")
         return json.dumps({"status": "error", "message": str(e)})
+
+@tool
+def simulate_grid_outage(
+    failed_asset_id: str,
+    output_layer_id: str,
+    output_layer_name: Optional[str] = None,
+    tolerance_meters: float = 1000.0
+) -> str:
+    """
+    Simulates an N-1 grid outage by tripping a generation facility or taking a 
+    transmission corridor offline. Identifies severed transmission corridors 
+    and de-energized distribution substations, materializing the impacted footprint.
+    """
+    safe_out = output_layer_id.strip().lower().replace(" ", "_")
+    layer_name = output_layer_name or f"Outage Impact: {failed_asset_id}"
+    safe_target = failed_asset_id.strip().replace("'", "''")
+    deg_tolerance = tolerance_meters / 111320.0
+
+    try:
+        # 1. Determine if the target is a generation asset or transmission line
+        gen_match = spatial_engine.con.execute(f"""
+            SELECT facility_id, facility_name, capacity_mw 
+            FROM utility_generation 
+            WHERE lower(facility_id) = lower('{safe_target}') 
+               OR lower(facility_name) LIKE lower('%{safe_target}%');
+        """).fetchone()
+
+        tx_match = spatial_engine.con.execute(f"""
+            SELECT line_id, line_name, voltage_kv 
+            FROM utility_transmission_lines 
+            WHERE lower(line_id) = lower('{safe_target}') 
+               OR lower(line_name) LIKE lower('%{safe_target}%');
+        """).fetchone()
+
+        if not gen_match and not tx_match:
+            return json.dumps({
+                "status": "error",
+                "message": f"Asset '{failed_asset_id}' not found in generation or transmission networks."
+            })
+
+        # 2. Formulate outage cascade query
+        if gen_match:
+            failed_id = gen_match[0]
+            failed_name = gen_match[1]
+            failed_type = "Generation Plant"
+
+            # When generation trips, all lines sourced by it and substations fed only by those lines go dark
+            cascade_sql = f"""
+                CREATE OR REPLACE TABLE {safe_out} AS
+                WITH severed_tx AS (
+                    SELECT line_id, line_name, voltage_kv, geom, 'SEVERED_TRANSMISSION' AS impact_status
+                    FROM utility_transmission_lines
+                    WHERE source_facility_id = '{failed_id}'
+                ),
+                deenergized_subs AS (
+                    SELECT s.substation_id, s.substation_name, s.capacity_mva, s.district, s.geom, 'DE_ENERGIZED' AS impact_status
+                    FROM utility_substations s, severed_tx tx
+                    WHERE ST_DWithin(s.geom, tx.geom, {deg_tolerance})
+                )
+                SELECT line_id AS asset_id, line_name AS asset_name, CAST(voltage_kv AS DOUBLE) AS rating, impact_status, geom
+                FROM severed_tx
+                UNION ALL
+                SELECT substation_id AS asset_id, substation_name AS asset_name, capacity_mva AS rating, impact_status, geom
+                FROM deenergized_subs;
+            """
+        else:
+            failed_id = tx_match[0]
+            failed_name = tx_match[1]
+            failed_type = "Transmission Corridor"
+
+            # When a specific transmission corridor trips, find substations that rely on it
+            cascade_sql = f"""
+                CREATE OR REPLACE TABLE {safe_out} AS
+                WITH target_tx AS (
+                    SELECT line_id, line_name, voltage_kv, geom, 'FAILED_CORRIDOR' AS impact_status
+                    FROM utility_transmission_lines
+                    WHERE line_id = '{failed_id}'
+                ),
+                deenergized_subs AS (
+                    SELECT s.substation_id, s.substation_name, s.capacity_mva, s.district, s.geom, 'DE_ENERGIZED' AS impact_status
+                    FROM utility_substations s, target_tx tx
+                    WHERE ST_DWithin(s.geom, tx.geom, {deg_tolerance})
+                )
+                SELECT line_id AS asset_id, line_name AS asset_name, CAST(voltage_kv AS DOUBLE) AS rating, impact_status, geom
+                FROM target_tx
+                UNION ALL
+                SELECT substation_id AS asset_id, substation_name AS asset_name, capacity_mva AS rating, impact_status, geom
+                FROM deenergized_subs;
+            """
+
+        spatial_engine.con.execute(cascade_sql)
+        count = spatial_engine.con.execute(f"SELECT COUNT(*) FROM {safe_out};").fetchone()[0]
+
+        # 3. Calculate unserved impact metrics
+        impact_metrics = spatial_engine.con.execute(f"""
+            SELECT 
+                COUNT(*) FILTER (WHERE impact_status = 'DE_ENERGIZED') AS unserved_substations,
+                COALESCE(SUM(rating) FILTER (WHERE impact_status = 'DE_ENERGIZED'), 0.0) AS unserved_mva
+            FROM {safe_out};
+        """).fetchone()
+
+        unserved_subs = impact_metrics[0]
+        unserved_mva = impact_metrics[1]
+
+        catalog_manager.register_layer(
+            layer_id=safe_out,
+            name=layer_name,
+            table_name=safe_out,
+            geom_type="GEOMETRYCOLLECTION",
+            feature_count=count,
+            description=f"N-1 Outage footprint following failure of {failed_type} '{failed_name}'."
+        )
+
+        return json.dumps({
+            "status": "success",
+            "layer_id": safe_out,
+            "failed_asset": failed_name,
+            "failed_asset_type": failed_type,
+            "feature_count": count,
+            "unserved_substations_count": unserved_subs,
+            "total_unserved_mva": unserved_mva,
+            "message": (
+                f"Simulated N-1 contingency for {failed_type} '{failed_name}'. "
+                f"Created impact layer '{safe_out}' with {count} affected assets. "
+                f"Unserved load: {unserved_mva} MVA across {unserved_subs} distribution substations."
+            )
+        })
+
+    except Exception as e:
+        logger.error(f"Contingency simulation failed: {e}")
+        return json.dumps({"status": "error", "message": str(e)})
+
+@tool
+def filter_utility_network(
+    network_element: str,
+    tier: Optional[str] = None,
+    voltage_kv: Optional[float] = None,
+    state: Optional[str] = None,
+    district: Optional[str] = None,
+    output_layer_id: Optional[str] = None,
+    output_layer_name: Optional[str] = None
+) -> str:
+    """
+    Filter Indian hierarchical utility network elements (GSS, PSS, DSS substations, feeders, switchgear/CBs)
+    by voltage class, operational tier, state, or district, creating a materialized analytical layer.
+
+    Args:
+        network_element: 'substations' (GSS/PSS/DSS), 'feeders' (transmission & distribution), or 'switchgear' (CBs).
+        tier: Operational level for substations ('GSS', 'PSS', 'DSS').
+        voltage_kv: Voltage level in kV (765, 400, 220, 132, 66, 33, 11).
+        state: State name to filter by (e.g., 'West Bengal', 'Maharashtra', 'Delhi', 'Karnataka').
+        district: District name to filter by (e.g., 'Howrah', 'Thane', 'North West Delhi').
+        output_layer_id: Target table/layer identifier.
+        output_layer_name: Display label for the output layer.
+    """
+    try:
+        element = network_element.lower().strip()
+        if "substation" in element:
+            source_table = "utility_substations_master"
+            geom_type = "POINT"
+            default_name = "Filtered Substations"
+        elif "feeder" in element or "line" in element or "corridor" in element:
+            source_table = "utility_feeders_master"
+            geom_type = "LINESTRING"
+            default_name = "Filtered Feeders"
+        elif "switchgear" in element or "breaker" in element or "cb" in element:
+            source_table = "utility_switchgear_master"
+            geom_type = "POINT"
+            default_name = "Filtered Circuit Breakers"
+        else:
+            source_table = "utility_substations_master"
+            geom_type = "POINT"
+            default_name = "Filtered Utility Network"
+
+        con = spatial_engine.con
+        table_cols = [row[0].lower() for row in con.execute(f"DESCRIBE {source_table};").fetchall()]
+
+        conditions = ["1=1"]
+        if tier and "tier" in table_cols:
+            conditions.append(f"UPPER(tier) = '{tier.upper()}'")
+        if voltage_kv and "voltage_kv" in table_cols:
+            conditions.append(f"voltage_kv = {float(voltage_kv)}")
+        if state and "state" in table_cols:
+            conditions.append(f"LOWER(state) LIKE '%{state.lower()}%'")
+        if district and "district" in table_cols:
+            conditions.append(f"LOWER(district) LIKE '%{district.lower()}%'")
+
+        where_clause = " AND ".join(conditions)
+
+        safe_out = (output_layer_id or f"filtered_{element}").lower().replace("-", "_").replace(" ", "_")
+        layer_name = output_layer_name or f"{default_name} ({tier or voltage_kv or state or 'Query'})"
+
+        con = spatial_engine.con
+        con.execute(f"DROP TABLE IF EXISTS {safe_out};")
+        create_sql = f"""
+            CREATE TABLE {safe_out} AS
+            SELECT * FROM {source_table}
+            WHERE {where_clause};
+        """
+        con.execute(create_sql)
+        count = con.execute(f"SELECT COUNT(*) FROM {safe_out};").fetchone()[0]
+
+        catalog_manager.register_layer(
+            layer_id=safe_out,
+            name=layer_name,
+            table_name=safe_out,
+            geom_type=geom_type,
+            feature_count=count,
+            description=f"Filtered {source_table} where {where_clause}"
+        )
+
+        return json.dumps({
+            "status": "success",
+            "layer_id": safe_out,
+            "feature_count": count,
+            "message": f"Materialized {count} assets matching criteria into layer '{safe_out}'."
+        })
+
+    except Exception as e:
+        logger.error(f"filter_utility_network failed: {e}")
+        return json.dumps({"status": "error", "message": str(e)})

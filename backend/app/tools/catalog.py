@@ -16,6 +16,9 @@ PROTECTED_BASE_LAYERS = {
     "utility_generation",
     "utility_transmission_lines",
     "utility_substations",
+    "utility_substations_master",
+    "utility_feeders_master",
+    "utility_switchgear_master",
     "spatial_catalog"
 }
 
@@ -91,6 +94,33 @@ ADMIN_BOUNDARIES_CATALOG = [
         "geom_type": "POINT",
         "feature_count": 5,
         "columns": ["substation_id", "substation_name", "voltage_ratio", "district", "capacity_mva", "geom"],
+        "is_system": True
+    },
+    {
+        "layer_id": "utility_substations_master",
+        "name": "All-India Substations (GSS/PSS/DSS)",
+        "description": "National multi-tier electrical substations categorized by tier: GSS (765-132kV), PSS (66-33kV), and DSS (11kV).",
+        "geom_type": "POINT",
+        "feature_count": 18,
+        "columns": ["substation_id", "substation_name", "tier", "voltage_kv", "capacity_mva", "state", "district", "operational_status", "geom"],
+        "is_system": True
+    },
+    {
+        "layer_id": "utility_feeders_master",
+        "name": "All-India Feeders & Corridors",
+        "description": "National multi-tier transmission corridors and distribution lines (400kV trunks, 33kV sub-transmission, 11kV primary feeders).",
+        "geom_type": "LINESTRING",
+        "feature_count": 14,
+        "columns": ["feeder_id", "feeder_name", "voltage_kv", "feeder_type", "source_substation_id", "target_substation_id", "circuit_type", "operational_status", "geom"],
+        "is_system": True
+    },
+    {
+        "layer_id": "utility_switchgear_master",
+        "name": "Grid Switchgear & Circuit Breakers (CBs)",
+        "description": "Substation switchyard equipment, Circuit Breakers (CBs), isolators, and RMUs with operational switching state (CLOSED/OPEN).",
+        "geom_type": "POINT",
+        "feature_count": 10,
+        "columns": ["switchgear_id", "switchgear_type", "parent_substation_id", "bay_name", "voltage_kv", "status", "geom"],
         "is_system": True
     }
 ]
