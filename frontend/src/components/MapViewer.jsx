@@ -138,6 +138,7 @@ export default function MapViewer({
   const mapContainer = useRef(null);
   const mapRef = useRef(null);
   const popupRef = useRef(null);
+  const hoverPopupRef = useRef(null);
   const [mapReady, setMapReady] = useState(false);
   const loadedLayersRef = useRef(new Map());
   const initialZoomDoneRef = useRef(false);
@@ -500,8 +501,101 @@ export default function MapViewer({
         .addTo(map);
     });
 
+    // Mouse hover tooltip listeners
+    map.on('mousemove', (e) => {
+      if (measurePointsRef.current.modeActive) return;
+
+      const activeIds = [];
+      loadedLayersRef.current.forEach((_, layerId) => {
+        [
+          `${layerId}-vector-points`,
+          `${layerId}-point-circle`,
+          `${layerId}-unclustered-points`,
+          `${layerId}-polygon-fill`,
+          `${layerId}-line`
+        ].forEach((subId) => {
+          if (map.getLayer(subId)) activeIds.push(subId);
+        });
+      });
+
+      if (activeIds.length === 0) return;
+
+      const features = map.queryRenderedFeatures(e.point, { layers: activeIds });
+
+      if (!features || features.length === 0) {
+        map.getCanvas().style.cursor = '';
+        if (hoverPopupRef.current) {
+          hoverPopupRef.current.remove();
+          hoverPopupRef.current = null;
+        }
+        return;
+      }
+
+      map.getCanvas().style.cursor = 'pointer';
+
+      const top = features[0];
+      const props = top.properties || {};
+      const layerId = top.layer.id.replace(
+        /-point-circle|-unclustered-points|-vector-points|-polygon-fill|-line/g,
+        ''
+      );
+
+      const primaryName =
+        props.village_name ||
+        props.name ||
+        props.NAME ||
+        props.city_name ||
+        props.district_name ||
+        props.state_name ||
+        'Feature';
+
+      const secondaryDetail =
+        props.state_code ? `State Code: ${props.state_code}` :
+        props.type ? `Type: ${props.type}` :
+        props.feature_code ? `Code: ${props.feature_code}` : '';
+
+      const tooltipContent = `
+        <div style="font-family: ui-sans-serif, system-ui, sans-serif; font-size: 11px; padding: 2px 4px; pointer-events: none;">
+          <div style="font-weight: 700; color: #38bdf8; text-transform: uppercase; font-size: 9px; letter-spacing: 0.05em;">
+            ${layerId}
+          </div>
+          <div style="font-weight: 600; color: #f8fafc; font-size: 12px; margin-top: 2px;">
+            ${primaryName}
+          </div>
+          ${
+            secondaryDetail
+              ? `<div style="color: #94a3b8; font-size: 10px; margin-top: 1px;">${secondaryDetail}</div>`
+              : ''
+          }
+        </div>
+      `;
+
+      if (!hoverPopupRef.current) {
+        hoverPopupRef.current = new maplibregl.Popup({
+          closeButton: false,
+          closeOnClick: false,
+          className: 'geoagent-map-hover-tooltip',
+          offset: 12
+        });
+      }
+
+      hoverPopupRef.current
+        .setLngLat(e.lngLat)
+        .setHTML(tooltipContent)
+        .addTo(map);
+    });
+
+    map.on('mouseleave', () => {
+      map.getCanvas().style.cursor = '';
+      if (hoverPopupRef.current) {
+        hoverPopupRef.current.remove();
+        hoverPopupRef.current = null;
+      }
+    });
+
     return () => {
       if (popupRef.current) popupRef.current.remove();
+      if (hoverPopupRef.current) hoverPopupRef.current.remove();
       map.remove();
       mapRef.current = null;
     };
@@ -1028,6 +1122,17 @@ export default function MapViewer({
         }
         .geoagent-map-popup .maplibregl-popup-tip {
           border-top-color: #0f172a !important;
+        }
+        .geoagent-map-hover-tooltip .maplibregl-popup-content {
+          background-color: rgba(15, 23, 42, 0.92) !important;
+          border: 1px solid #334155 !important;
+          border-radius: 6px !important;
+          padding: 6px 10px !important;
+          box-shadow: 0 4px 15px rgba(0, 0, 0, 0.5) !important;
+          pointer-events: none !important;
+        }
+        .geoagent-map-hover-tooltip .maplibregl-popup-tip {
+          border-top-color: rgba(15, 23, 42, 0.92) !important;
         }
       `}</style>
 
