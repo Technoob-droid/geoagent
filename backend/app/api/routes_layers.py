@@ -1,12 +1,17 @@
 import io
 import os
 import json
+import logging
 import zipfile
 import tempfile
-from fastapi import APIRouter, HTTPException, Query
-from fastapi.responses import Response, StreamingResponse
+from fastapi import APIRouter, HTTPException, Query, Response
+from fastapi.responses import StreamingResponse
 from backend.app.tools.engine import spatial_engine
 from backend.app.tools.catalog import catalog_manager
+# from backend.app.utils.tiles import tile_to_bbox_3857
+from backend.app.utils.tiles import tile_to_bbox_4326
+
+logger = logging.getLogger("geoagent.api.layers")
 
 router = APIRouter(prefix="/api/layers", tags=["layers"])
 
@@ -25,6 +30,57 @@ VILLAGES_PARQUET = f"{BOUNDARIES_DIR}/villages/india_villages.parquet"
 async def get_all_layers():
     """Returns metadata for all available layers in the spatial catalog."""
     return catalog_manager.list_layers()
+
+@router.get("/tiles/{layer_id}/{z}/{x}/{y}.pbf")
+async def get_vector_tile(layer_id: str, z: int, x: int, y: int):
+    """
+    Encodes spatial geometries into Mapbox Vector Tile (.pbf) format
+    using DuckDB's native ST_AsMVT.
+    """
+    conn = getattr(spatial_engine, "con", None) or getattr(spatial_engine, "conn", None)
+    if not conn:
+        raise HTTPException(status_code=500, detail="Database connection unavailable.")
+
+    resolved_id = catalog_manager.resolve_layer_id(layer_id) or layer_id.strip().lower()
+    min_x, min_y, max_x, max_y = tile_to_bbox_4326(z, x, y)
+
+# BOX_2D(min_x, min_y, max_x, max_y) provides the native bounding box type for ST_AsMVTGeom
+    sql_mvt = f"""
+        WITH bounds AS (
+            SELECT ST_Extent(ST_MakeEnvelope({min_x}, {min_y}, {max_x}, {max_y})) AS tile_box
+        )
+        SELECT ST_AsMVT(t, '{resolved_id}', 4096, 'mvt_geom') AS mvt
+        FROM (
+            SELECT 
+                * EXCLUDE (geom),
+                ST_AsMVTGeom(
+                    geom, 
+                    (SELECT tile_box FROM bounds), 
+                    4096::BIGINT, 
+                    256::BIGINT, 
+                    true
+                ) AS mvt_geom
+            FROM {resolved_id}
+            WHERE geom IS NOT NULL
+              AND ST_Intersects(geom, ST_MakeEnvelope({min_x}, {min_y}, {max_x}, {max_y}))
+        ) AS t;
+    """
+
+    try:
+        row = conn.execute(sql_mvt).fetchone()
+        tile_bytes = row[0] if row and row[0] else b""
+        return Response(
+            content=bytes(tile_bytes),
+            media_type="application/x-protobuf",
+            headers={
+                "Content-Encoding": "none",
+                "Cache-Control": "public, max-age=3600"
+            }
+        )
+    except Exception as e:
+        logger.error(f"Error generating tile {z}/{x}/{y} for '{resolved_id}': {e}", exc_info=True)
+        return Response(content=b"", media_type="application/x-protobuf")
+
 
 
 @router.get("/resolver/search")

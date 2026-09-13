@@ -6,6 +6,14 @@ import { COLOR_PALETTES, buildInterpolateColor } from '../utils/colorRamps';
 
 const CURRENT_LOCATION = [88.3639, 22.5726]; // Kolkata coordinates [lng, lat]
 
+// Layers served via DuckDB vector tiles rather than GeoJSON payloads
+const VECTOR_TILE_LAYERS = new Set([
+  'india_villages',
+  'india_cities',
+  'villages',
+  'cities'
+]);
+
 const PALETTE = [
   { fill: '#38bdf8', stroke: '#0284c7' },
   { fill: '#a855f7', stroke: '#7e22ce' },
@@ -16,12 +24,12 @@ const PALETTE = [
 ];
 
 const METRIC_PRIORITY_KEYS = [
-  'feature_count',    // Prioritizes aggregated counts (e.g., villages exposed)
+  'feature_count',
   'metric_sum',
   'metric_avg',
   'metric_max',
   'metric_min',
-  'ring_order',       // Falls back to buffer ring tier when no count is present
+  'ring_order',
   'count',
   'population',
   'risk_score'
@@ -85,7 +93,6 @@ function computeBBox(geojson) {
 function extractChoroplethDomain(geojson) {
   if (!geojson || !geojson.features || geojson.features.length === 0) return null;
 
-  // Find candidate numeric property
   const sampleProps = geojson.features[0]?.properties || {};
   let selectedProp = null;
 
@@ -414,6 +421,7 @@ export default function MapViewer({
           `${layerId}-cluster-circles`,
           `${layerId}-point-circle`,
           `${layerId}-unclustered-points`,
+          `${layerId}-vector-points`,
           `${layerId}-polygon-fill`,
           `${layerId}-line`
         ].forEach((subId) => {
@@ -452,7 +460,7 @@ export default function MapViewer({
 
       const props = topFeature.properties || {};
       const layerBaseName = clickedLayerId.replace(
-        /-point-circle|-unclustered-points|-polygon-fill|-line|-cluster-circles/g,
+        /-point-circle|-unclustered-points|-vector-points|-polygon-fill|-line|-cluster-circles/g,
         ''
       );
 
@@ -514,6 +522,7 @@ export default function MapViewer({
             `${id}-polygon-stroke`,
             `${id}-line`,
             `${id}-point-circle`,
+            `${id}-vector-points`,
             `${id}-cluster-circles`,
             `${id}-cluster-counts`,
             `${id}-unclustered-points`,
@@ -537,193 +546,281 @@ export default function MapViewer({
         const mode = displayModes[layerId] || 'points';
         const isHidden = hiddenLayers.has(layerId);
         const alpha = opacities[layerId] ?? 0.75;
+        const useVectorTiles = VECTOR_TILE_LAYERS.has(layerId.toLowerCase()) || layer.format === 'mvt';
 
-        if (!loadedLayersRef.current.has(layerId)) {
+        // Check if layer is already loaded in ref or already mounted on map
+        if (!loadedLayersRef.current.has(layerId) && !map.getSource(layerId)) {
           try {
-            const res = await fetch(`/api/layers/${layerId}/geojson`);
-            if (!res.ok) continue;
-            const data = await res.json();
+            if (useVectorTiles) {
+              const tileUrl = `${window.location.origin}/api/layers/tiles/${layerId}/{z}/{x}/{y}.pbf`;
 
-            map.addSource(layerId, {
-              type: 'geojson',
-              data,
-              cluster: isPoint,
-              clusterRadius: 50,
-              clusterMaxZoom: 14
-            });
-
-            if (isPoint) {
-              map.addLayer({
-                id: `${layerId}-point-circle`,
-                type: 'circle',
-                source: layerId,
-                filter: ['!', ['has', 'point_count']],
-                layout: { visibility: !isHidden && mode === 'points' ? 'visible' : 'none' },
-                paint: {
-                  'circle-radius': 8,
-                  'circle-color': color.fill,
-                  'circle-stroke-width': 2,
-                  'circle-stroke-color': '#ffffff',
-                  'circle-opacity': alpha
-                }
-              });
-
-              map.addLayer({
-                id: `${layerId}-heatmap`,
-                type: 'heatmap',
-                source: layerId,
-                maxzoom: 17,
-                layout: { visibility: !isHidden && mode === 'heatmap' ? 'visible' : 'none' },
-                paint: {
-                  'heatmap-weight': 1,
-                  'heatmap-intensity': ['interpolate', ['linear'], ['zoom'], 0, 2, 9, 4, 15, 8],
-                  'heatmap-color': [
-                    'interpolate',
-                    ['linear'],
-                    ['heatmap-density'],
-                    0, 'rgba(0, 0, 0, 0)',
-                    0.05, '#38bdf8',
-                    0.2, '#34d399',
-                    0.5, '#facc15',
-                    0.7, '#fb923c',
-                    1.0, '#f43f5e'
-                  ],
-                  'heatmap-radius': ['interpolate', ['linear'], ['zoom'], 0, 25, 10, 50, 15, 100],
-                  'heatmap-opacity': alpha
-                }
-              });
-
-              map.addLayer({
-                id: `${layerId}-cluster-circles`,
-                type: 'circle',
-                source: layerId,
-                filter: ['has', 'point_count'],
-                layout: { visibility: !isHidden && mode === 'clusters' ? 'visible' : 'none' },
-                paint: {
-                  'circle-color': ['step', ['get', 'point_count'], color.fill, 5, '#6366f1', 20, '#f43f5e'],
-                  'circle-radius': ['step', ['get', 'point_count'], 18, 5, 24, 20, 32],
-                  'circle-opacity': alpha,
-                  'circle-stroke-width': 2,
-                  'circle-stroke-color': '#ffffff'
-                }
-              });
-
-              map.addLayer({
-                id: `${layerId}-cluster-counts`,
-                type: 'symbol',
-                source: layerId,
-                filter: ['has', 'point_count'],
-                layout: {
-                  visibility: !isHidden && mode === 'clusters' ? 'visible' : 'none',
-                  'text-field': '{point_count_abbreviated}',
-                  'text-size': 13
-                },
-                paint: { 'text-color': '#ffffff' }
-              });
-
-              map.addLayer({
-                id: `${layerId}-unclustered-points`,
-                type: 'circle',
-                source: layerId,
-                filter: ['!', ['has', 'point_count']],
-                layout: { visibility: !isHidden && mode === 'clusters' ? 'visible' : 'none' },
-                paint: {
-                  'circle-color': color.fill,
-                  'circle-radius': 7,
-                  'circle-stroke-width': 2,
-                  'circle-stroke-color': '#ffffff',
-                  'circle-opacity': alpha
-                }
-              });
-            } else if (geomType === 'LINESTRING' || geomType === 'MULTILINESTRING') {
-              map.addLayer({
-                id: `${layerId}-line`,
-                type: 'line',
-                source: layerId,
-                layout: { visibility: isHidden ? 'none' : 'visible' },
-                paint: {
-                  'line-color': color.stroke,
-                  'line-width': 3,
-                  'line-opacity': alpha
-                }
-              });
-            } else {
-              // Check for continuous numerical metrics for choropleth mapping
-              const domain = extractChoroplethDomain(data);
-              const isChoropleth = domain && domain.min !== domain.max;
-
-              const fillColorExpr = isChoropleth
-                ? buildInterpolateColor(domain.property, domain.min, domain.max, COLOR_PALETTES.viridis)
-                : color.fill;
-
-              if (isChoropleth && !isHidden) {
-                detectedLegend = {
-                  layerName: layer.name || layerId,
-                  property: domain.property,
-                  min: domain.min,
-                  max: domain.max,
-                  palette: COLOR_PALETTES.viridis
-                };
+              if (!map.getSource(layerId)) {
+                map.addSource(layerId, {
+                  type: 'vector',
+                  tiles: [tileUrl],
+                  minzoom: 0,
+                  maxzoom: 16
+                });
               }
 
-              map.addLayer({
-                id: `${layerId}-polygon-fill`,
-                type: 'fill',
-                source: layerId,
-                layout: { visibility: isHidden ? 'none' : 'visible' },
-                paint: {
-                  'fill-color': fillColorExpr,
-                  'fill-opacity': alpha * 0.7
+              const isVillageLayer = layerId.toLowerCase().includes('village');
+              const vectorLayerId = `${layerId}-vector-points`;
+
+              if (!map.getLayer(vectorLayerId)) {
+                map.addLayer({
+                  id: vectorLayerId,
+                  type: 'circle',
+                  source: layerId,
+                  'source-layer': layerId,
+                  minzoom: 1, // Render at country zoom levels
+                  layout: { visibility: isHidden ? 'none' : 'visible' },
+                  paint: {
+                    'circle-radius': isVillageLayer
+                      ? [
+                          'interpolate',
+                          ['linear'],
+                          ['zoom'],
+                          1, 0.5,
+                          4, 0.8,
+                          7, 1.8,
+                          11, 3.5,
+                          14, 6
+                        ]
+                      : [
+                          'interpolate',
+                          ['linear'],
+                          ['zoom'],
+                          2, 4.5,
+                          6, 6.5,
+                          10, 9
+                        ],
+                    'circle-color': color.fill,
+                    'circle-stroke-width': isVillageLayer
+                      ? [
+                          'interpolate',
+                          ['linear'],
+                          ['zoom'],
+                          1, 0,
+                          8, 0,
+                          10, 0.6
+                        ]
+                      : 1.5,
+                    'circle-stroke-color': '#ffffff',
+                    'circle-opacity': isVillageLayer
+                      ? [
+                          'interpolate',
+                          ['linear'],
+                          ['zoom'],
+                          1, 0.35,
+                          7, alpha
+                        ]
+                      : alpha
+                  }
+                });
+              }
+
+              loadedLayersRef.current.set(layerId, { isVector: true, geomType, color });
+            } else {
+              // Load as Standard GeoJSON for analytical outputs
+              const res = await fetch(`/api/layers/${layerId}/geojson`);
+              if (!res.ok) continue;
+              const data = await res.json();
+
+              if (!map.getSource(layerId)) {
+                map.addSource(layerId, {
+                  type: 'geojson',
+                  data,
+                  cluster: isPoint,
+                  clusterRadius: 50,
+                  clusterMaxZoom: 14
+                });
+              }
+
+              if (isPoint) {
+                if (!map.getLayer(`${layerId}-point-circle`)) {
+                  map.addLayer({
+                    id: `${layerId}-point-circle`,
+                    type: 'circle',
+                    source: layerId,
+                    filter: ['!', ['has', 'point_count']],
+                    layout: { visibility: !isHidden && mode === 'points' ? 'visible' : 'none' },
+                    paint: {
+                      'circle-radius': 8,
+                      'circle-color': color.fill,
+                      'circle-stroke-width': 2,
+                      'circle-stroke-color': '#ffffff',
+                      'circle-opacity': alpha
+                    }
+                  });
                 }
-              });
 
-              map.addLayer({
-                id: `${layerId}-polygon-stroke`,
-                type: 'line',
-                source: layerId,
-                layout: { visibility: isHidden ? 'none' : 'visible' },
-                paint: {
-                  'line-color': isChoropleth ? '#ffffff' : color.stroke,
-                  'line-width': isChoropleth ? 1.5 : 2,
-                  'line-opacity': alpha
+                if (!map.getLayer(`${layerId}-heatmap`)) {
+                  map.addLayer({
+                    id: `${layerId}-heatmap`,
+                    type: 'heatmap',
+                    source: layerId,
+                    maxzoom: 17,
+                    layout: { visibility: !isHidden && mode === 'heatmap' ? 'visible' : 'none' },
+                    paint: {
+                      'heatmap-weight': 1,
+                      'heatmap-intensity': ['interpolate', ['linear'], ['zoom'], 0, 2, 9, 4, 15, 8],
+                      'heatmap-color': [
+                        'interpolate',
+                        ['linear'],
+                        ['heatmap-density'],
+                        0, 'rgba(0, 0, 0, 0)',
+                        0.05, '#38bdf8',
+                        0.2, '#34d399',
+                        0.5, '#facc15',
+                        0.7, '#fb923c',
+                        1.0, '#f43f5e'
+                      ],
+                      'heatmap-radius': ['interpolate', ['linear'], ['zoom'], 0, 25, 10, 50, 15, 100],
+                      'heatmap-opacity': alpha
+                    }
+                  });
                 }
-              });
-            }
 
-            loadedLayersRef.current.set(layerId, { geojson: data, geomType, color });
+                if (!map.getLayer(`${layerId}-cluster-circles`)) {
+                  map.addLayer({
+                    id: `${layerId}-cluster-circles`,
+                    type: 'circle',
+                    source: layerId,
+                    filter: ['has', 'point_count'],
+                    layout: { visibility: !isHidden && mode === 'clusters' ? 'visible' : 'none' },
+                    paint: {
+                      'circle-color': ['step', ['get', 'point_count'], color.fill, 5, '#6366f1', 20, '#f43f5e'],
+                      'circle-radius': ['step', ['get', 'point_count'], 18, 5, 24, 20, 32],
+                      'circle-opacity': alpha,
+                      'circle-stroke-width': 2,
+                      'circle-stroke-color': '#ffffff'
+                    }
+                  });
+                }
 
-            // Do not auto-zoom on base countrywide background layers
-            const isBaseAdmin = [
-              'india_states',
-              'india_districts',
-              'india_subdistricts',
-              'india_cities',
-              'india_villages'
-            ].includes(layerId);
+                if (!map.getLayer(`${layerId}-cluster-counts`)) {
+                  map.addLayer({
+                    id: `${layerId}-cluster-counts`,
+                    type: 'symbol',
+                    source: layerId,
+                    filter: ['has', 'point_count'],
+                    layout: {
+                      visibility: !isHidden && mode === 'clusters' ? 'visible' : 'none',
+                      'text-field': '{point_count_abbreviated}',
+                      'text-size': 13
+                    },
+                    paint: { 'text-color': '#ffffff' }
+                  });
+                }
 
-            const bbox = computeBBox(data);
-            if (bbox) {
-              if (!isBaseAdmin) {
-                // Smoothly zoom into any newly materialized user/analytical layer
-                map.fitBounds(
-                  [[bbox[0], bbox[1]], [bbox[2], bbox[3]]],
-                  { padding: 80, maxZoom: 13, duration: 1200 }
-                );
-              } else if (!initialZoomDoneRef.current) {
-                map.fitBounds(
-                  [[bbox[0], bbox[1]], [bbox[2], bbox[3]]],
-                  { padding: 80, maxZoom: 14, duration: 1000 }
-                );
-                initialZoomDoneRef.current = true;
+                if (!map.getLayer(`${layerId}-unclustered-points`)) {
+                  map.addLayer({
+                    id: `${layerId}-unclustered-points`,
+                    type: 'circle',
+                    source: layerId,
+                    filter: ['!', ['has', 'point_count']],
+                    layout: { visibility: !isHidden && mode === 'clusters' ? 'visible' : 'none' },
+                    paint: {
+                      'circle-color': color.fill,
+                      'circle-radius': 7,
+                      'circle-stroke-width': 2,
+                      'circle-stroke-color': '#ffffff',
+                      'circle-opacity': alpha
+                    }
+                  });
+                }
+              } else if (geomType === 'LINESTRING' || geomType === 'MULTILINESTRING') {
+                if (!map.getLayer(`${layerId}-line`)) {
+                  map.addLayer({
+                    id: `${layerId}-line`,
+                    type: 'line',
+                    source: layerId,
+                    layout: { visibility: isHidden ? 'none' : 'visible' },
+                    paint: {
+                      'line-color': color.stroke,
+                      'line-width': 3,
+                      'line-opacity': alpha
+                    }
+                  });
+                }
+              } else {
+                const domain = extractChoroplethDomain(data);
+                const isChoropleth = domain && domain.min !== domain.max;
+
+                const fillColorExpr = isChoropleth
+                  ? buildInterpolateColor(domain.property, domain.min, domain.max, COLOR_PALETTES.viridis)
+                  : color.fill;
+
+                if (isChoropleth && !isHidden) {
+                  detectedLegend = {
+                    layerName: layer.name || layerId,
+                    property: domain.property,
+                    min: domain.min,
+                    max: domain.max,
+                    palette: COLOR_PALETTES.viridis
+                  };
+                }
+
+                if (!map.getLayer(`${layerId}-polygon-fill`)) {
+                  map.addLayer({
+                    id: `${layerId}-polygon-fill`,
+                    type: 'fill',
+                    source: layerId,
+                    layout: { visibility: isHidden ? 'none' : 'visible' },
+                    paint: {
+                      'fill-color': fillColorExpr,
+                      'fill-opacity': alpha * 0.7
+                    }
+                  });
+                }
+
+                if (!map.getLayer(`${layerId}-polygon-stroke`)) {
+                  map.addLayer({
+                    id: `${layerId}-polygon-stroke`,
+                    type: 'line',
+                    source: layerId,
+                    layout: { visibility: isHidden ? 'none' : 'visible' },
+                    paint: {
+                      'line-color': isChoropleth ? '#ffffff' : color.stroke,
+                      'line-width': isChoropleth ? 1.5 : 2,
+                      'line-opacity': alpha
+                    }
+                  });
+                }
+              }
+
+              loadedLayersRef.current.set(layerId, { isVector: false, geojson: data, geomType, color });
+
+              const isBaseAdmin = [
+                'india_states',
+                'india_districts',
+                'india_subdistricts',
+                'india_cities',
+                'india_villages'
+              ].includes(layerId);
+
+              const bbox = computeBBox(data);
+              if (bbox) {
+                if (!isBaseAdmin) {
+                  map.fitBounds(
+                    [[bbox[0], bbox[1]], [bbox[2], bbox[3]]],
+                    { padding: 80, maxZoom: 13, duration: 1200 }
+                  );
+                } else if (!initialZoomDoneRef.current) {
+                  map.fitBounds(
+                    [[bbox[0], bbox[1]], [bbox[2], bbox[3]]],
+                    { padding: 80, maxZoom: 14, duration: 1000 }
+                  );
+                  initialZoomDoneRef.current = true;
+                }
               }
             }
           } catch (err) {
             console.error(`Failed to load layer ${layerId}:`, err);
           }
         } else {
-          // If layer already loaded, evaluate active legend candidate
           const existing = loadedLayersRef.current.get(layerId);
-          if (existing && existing.geomType !== 'POINT' && !isHidden) {
+          if (existing && !existing.isVector && existing.geomType !== 'POINT' && !isHidden) {
             const domain = extractChoroplethDomain(existing.geojson);
             if (domain && domain.min !== domain.max && !detectedLegend) {
               detectedLegend = {
@@ -756,8 +853,16 @@ export default function MapViewer({
       const mode = displayModes[layerId] || 'points';
       const geomType = layer.geom_type?.toUpperCase();
       const isPoint = geomType === 'POINT' || geomType === 'MULTIPOINT';
+      const useVectorTiles = VECTOR_TILE_LAYERS.has(layerId.toLowerCase()) || layer.format === 'mvt';
 
-      if (isPoint) {
+      if (useVectorTiles) {
+        if (map.getLayer(`${layerId}-vector-points`)) {
+          map.setLayoutProperty(`${layerId}-vector-points`, 'visibility', isHidden ? 'none' : 'visible');
+          if (!isHidden) {
+            map.setPaintProperty(`${layerId}-vector-points`, 'circle-opacity', alpha);
+          }
+        }
+      } else if (isPoint) {
         const showPoints = !isHidden && mode === 'points';
         const showClusters = !isHidden && mode === 'clusters';
         const showHeatmap = !isHidden && mode === 'heatmap';
