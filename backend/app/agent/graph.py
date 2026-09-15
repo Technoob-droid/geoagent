@@ -33,6 +33,7 @@ primary_llm = ChatGroq(
     model="openai/gpt-oss-120b",
     temperature=0,
     max_tokens=1000,
+        max_retries=0,
     groq_api_key=groq_key,
 ).bind_tools(ALL_SPATIAL_TOOLS)
 
@@ -40,6 +41,7 @@ fallback_llm_1 = ChatGroq(
     model="openai/gpt-oss-20b",
     temperature=0,
     max_tokens=1000,
+        max_retries=0,
     groq_api_key=groq_key,
 ).bind_tools(ALL_SPATIAL_TOOLS)
 
@@ -47,6 +49,7 @@ fallback_llm_2 = ChatGroq(
     model="qwen/qwen3.6-27b",
     temperature=0,
     max_tokens=1000,
+        max_retries=0,
     groq_api_key=groq_key,
 ).bind_tools(ALL_SPATIAL_TOOLS)
 

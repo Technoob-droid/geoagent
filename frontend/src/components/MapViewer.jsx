@@ -11,7 +11,10 @@ const VECTOR_TILE_LAYERS = new Set([
   'india_villages',
   'india_cities',
   'villages',
-  'cities'
+  'cities',
+  'utility_feeders_master',
+  'utility_substations_master',
+  'utility_switchgear_master'
 ]);
 
 const PALETTE = [
@@ -396,7 +399,40 @@ export default function MapViewer({
       });
 
       mapRef.current = map;
-      setMapReady(true);
+              // Register custom high-contrast electric bolt SVG/canvas icon
+        const addBoltImage = () => {
+          if (map.hasImage('bolt-icon')) return;
+          const size = 32;
+          const canvas = document.createElement('canvas');
+          canvas.width = size;
+          canvas.height = size;
+          const ctx = canvas.getContext('2d');
+          
+          ctx.save();
+          ctx.scale(size / 32, size / 32);
+          ctx.beginPath();
+          ctx.moveTo(19, 2);
+          ctx.lineTo(8, 17);
+          ctx.lineTo(15, 17);
+          ctx.lineTo(13, 30);
+          ctx.lineTo(26, 13);
+          ctx.lineTo(18, 13);
+          ctx.closePath();
+          
+          ctx.strokeStyle = '#000000';
+          ctx.lineWidth = 3;
+          ctx.lineJoin = 'round';
+          ctx.stroke();
+          
+          ctx.fillStyle = '#facc15';
+          ctx.fill();
+          ctx.restore();
+
+          const imageData = ctx.getImageData(0, 0, size, size);
+          map.addImage('bolt-icon', imageData, { pixelRatio: 2 });
+        };
+        addBoltImage();
+        setMapReady(true);
       updateViewportBoundaries();
     });
 
@@ -617,7 +653,7 @@ export default function MapViewer({
             `${id}-line`,
             `${id}-collection-lines`,
             `${id}-collection-points`,
-            `${id}-point-circle`,
+            `${id}-point-circle`, `${id}-point-icon`,
             `${id}-vector-points`,
             `${id}-cluster-circles`,
             `${id}-cluster-counts`,
@@ -659,62 +695,83 @@ export default function MapViewer({
                 });
               }
 
+              const isLineLayer = geomType === 'LINESTRING' || geomType === 'MULTILINESTRING' || layerId.includes('feeder');
               const isVillageLayer = layerId.toLowerCase().includes('village');
-              const vectorLayerId = `${layerId}-vector-points`;
 
-              if (!map.getLayer(vectorLayerId)) {
-                map.addLayer({
-                  id: vectorLayerId,
-                  type: 'circle',
-                  source: layerId,
-                  'source-layer': layerId,
-                  minzoom: 1, // Render at country zoom levels
-                  layout: { visibility: isHidden ? 'none' : 'visible' },
-                  paint: {
-                    'circle-radius': isVillageLayer
-                      ? [
-                          'interpolate',
-                          ['linear'],
-                          ['zoom'],
-                          1, 0.5,
-                          4, 0.8,
-                          7, 1.8,
-                          11, 3.5,
-                          14, 6
-                        ]
-                      : [
-                          'interpolate',
-                          ['linear'],
-                          ['zoom'],
-                          2, 4.5,
-                          6, 6.5,
-                          10, 9
-                        ],
-                    'circle-color': color.fill,
-                    'circle-stroke-width': isVillageLayer
-                      ? [
-                          'interpolate',
-                          ['linear'],
-                          ['zoom'],
-                          1, 0,
-                          8, 0,
-                          10, 0.6
-                        ]
-                      : 1.5,
-                    'circle-stroke-color': '#ffffff',
-                    'circle-opacity': isVillageLayer
-                      ? [
-                          'interpolate',
-                          ['linear'],
-                          ['zoom'],
-                          1, 0.35,
-                          7, alpha
-                        ]
-                      : alpha
-                  }
-                });
+              if (isLineLayer) {
+                const vectorLineId = `${layerId}-vector-line`;
+                if (!map.getLayer(vectorLineId)) {
+                  map.addLayer({
+                    id: vectorLineId,
+                    type: 'line',
+                    source: layerId,
+                    'source-layer': layerId,
+                    minzoom: 1,
+                    layout: {
+                      visibility: isHidden ? 'none' : 'visible',
+                      'line-join': 'round',
+                      'line-cap': 'round'
+                    },
+                    paint: {
+                      'line-width': [
+                        'interpolate', ['linear'], ['zoom'],
+                        3, 1.0,
+                        8, 1.8,
+                        13, 3.2
+                      ],
+                      'line-color': [
+                        'step',
+                        ['coalesce', ['get', 'voltage_kv'], 33],
+                        '#10b981',        // < 33 kV (Green)
+                        33, '#06b6d4',    // 33 kV (Cyan)
+                        66, '#3b82f6',    // 66 kV (Blue)
+                        132, '#8b5cf6',   // 132 kV (Violet)
+                        220, '#f59e0b',   // 220 kV (Amber)
+                        400, '#ef4444',   // 400 kV (Red)
+                        765, '#ec4899'    // 765 kV+ (Pink)
+                      ],
+                      'line-opacity': alpha
+                    }
+                  });
+                }
+              } else {
+                const vectorLayerId = `${layerId}-vector-points`;
+                if (!map.getLayer(vectorLayerId)) {
+                  map.addLayer({
+                    id: vectorLayerId,
+                    type: 'circle',
+                    source: layerId,
+                    'source-layer': layerId,
+                    minzoom: 1,
+                    layout: { visibility: isHidden ? 'none' : 'visible' },
+                    paint: {
+                      'circle-radius': isVillageLayer
+                        ? [
+                            'interpolate',
+                            ['linear'],
+                            ['zoom'],
+                            1, 0.5,
+                            4, 0.8,
+                            7, 1.8,
+                            11, 3.5,
+                            14, 6
+                          ]
+                        : [
+                            'interpolate',
+                            ['linear'],
+                            ['zoom'],
+                            2, 4.5,
+                            6, 6.5,
+                            10, 9
+                          ],
+                      'circle-color': color.fill,
+                      'circle-stroke-width': 1,
+                      'circle-stroke-color': color.stroke,
+                      'circle-opacity': alpha
+                    }
+                  });
+                }
               }
-
               loadedLayersRef.current.set(layerId, { isVector: true, geomType, color });
             } else {
               // Load as Standard GeoJSON for analytical outputs
@@ -799,7 +856,24 @@ export default function MapViewer({
                   });
                 }
 
-                if (!map.getLayer(`${layerId}-heatmap`)) {
+                                  const isUtilityPoint = isSubstationMaster || isSwitchgearMaster || layerId.toLowerCase().includes('utility') || layerId.toLowerCase().includes('pss') || layerId.toLowerCase().includes('gss') || layerId.toLowerCase().includes('generation') || layerId.toLowerCase().includes('wb_33kv');
+                  if (isUtilityPoint && !map.getLayer(`${layerId}-point-icon`)) {
+                    map.addLayer({
+                      id: `${layerId}-point-icon`,
+                      type: 'symbol',
+                      source: layerId,
+                      filter: ['!', ['has', 'point_count']],
+                      layout: {
+                        visibility: !isHidden && mode === 'points' ? 'visible' : 'none',
+                        'icon-image': 'bolt-icon',
+                        'icon-size': 0.7,
+                        'icon-allow-overlap': true,
+                        'icon-ignore-placement': true
+                      }
+                    });
+                  }
+
+                  if (!map.getLayer(`${layerId}-heatmap`)) {
                   map.addLayer({
                     id: `${layerId}-heatmap`,
                     type: 'heatmap',
@@ -1075,10 +1149,18 @@ export default function MapViewer({
       const useVectorTiles = VECTOR_TILE_LAYERS.has(layerId.toLowerCase()) || layer.format === 'mvt';
 
       if (useVectorTiles) {
-        if (map.getLayer(`${layerId}-vector-points`)) {
-          map.setLayoutProperty(`${layerId}-vector-points`, 'visibility', isHidden ? 'none' : 'visible');
+        const vectorPointId = `${layerId}-vector-points`;
+        const vectorLineId = `${layerId}-vector-line`;
+        if (map.getLayer(vectorPointId)) {
+          map.setLayoutProperty(vectorPointId, 'visibility', isHidden ? 'none' : 'visible');
           if (!isHidden) {
-            map.setPaintProperty(`${layerId}-vector-points`, 'circle-opacity', alpha);
+            map.setPaintProperty(vectorPointId, 'circle-opacity', alpha);
+          }
+        }
+        if (map.getLayer(vectorLineId)) {
+          map.setLayoutProperty(vectorLineId, 'visibility', isHidden ? 'none' : 'visible');
+          if (!isHidden) {
+            map.setPaintProperty(vectorLineId, 'line-opacity', alpha);
           }
         }
       } else if (isPoint) {
@@ -1086,7 +1168,10 @@ export default function MapViewer({
         const showClusters = !isHidden && mode === 'clusters';
         const showHeatmap = !isHidden && mode === 'heatmap';
 
-        if (map.getLayer(`${layerId}-point-circle`)) {
+                  if (map.getLayer(`${layerId}-point-icon`)) {
+            map.setLayoutProperty(`${layerId}-point-icon`, 'visibility', showPoints ? 'visible' : 'none');
+          }
+          if (map.getLayer(`${layerId}-point-circle`)) {
           map.setLayoutProperty(`${layerId}-point-circle`, 'visibility', showPoints ? 'visible' : 'none');
           if (showPoints) map.setPaintProperty(`${layerId}-point-circle`, 'circle-opacity', alpha);
         }
