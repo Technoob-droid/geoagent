@@ -13,7 +13,7 @@ from langchain_groq import ChatGroq
 from langchain_core.messages import SystemMessage, ToolMessage
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
-from groq import RateLimitError
+from groq import RateLimitError, APIError
 
 from backend.app.config import settings
 from backend.app.agent.state import AgentState
@@ -56,7 +56,7 @@ fallback_llm_2 = ChatGroq(
 # Construct auto-failover chain targeting HTTP 429 RateLimitError
 llm = primary_llm.with_fallbacks(
     fallbacks=[fallback_llm_1, fallback_llm_2],
-    exceptions_to_handle=(RateLimitError,)
+    exceptions_to_handle=(RateLimitError, APIError, Exception)
 )
 
 
@@ -88,7 +88,11 @@ async def agent_node(state: AgentState) -> dict:
             active_dialogue.append(msg)
 
     messages = [SystemMessage(content=sys_prompt)] + active_dialogue
-    response = await llm.ainvoke(messages)
+    try:
+        response = await llm.ainvoke(messages)
+    except Exception as exc:
+        logger.warning(f"LLM primary & fallback chain error: {exc}. Retrying without streaming tool format.")
+        response = await fallback_llm_1.ainvoke(messages)
 
     tool_calls = getattr(response, "tool_calls", [])
 
