@@ -1,3 +1,4 @@
+import asyncio
 import os
 import json
 import logging
@@ -89,7 +90,10 @@ async def agent_node(state: AgentState) -> dict:
 
     messages = [SystemMessage(content=sys_prompt)] + active_dialogue
     try:
-        response = await llm.ainvoke(messages)
+        # If intermediate tool messages exist, pace calls slightly to respect 8,000 TPM limit
+    if any(getattr(m, "type", "") == "tool" for m in tail_messages):
+        await asyncio.sleep(8)
+    response = await llm.ainvoke(messages)
     except Exception as exc:
         logger.warning(f"LLM primary & fallback chain error: {exc}. Retrying without streaming tool format.")
         response = await fallback_llm_1.ainvoke(messages)
