@@ -1768,3 +1768,188 @@ def filter_utility_network(
     except Exception as e:
         logger.error(f"filter_utility_network failed: {e}")
         return json.dumps({"status": "error", "message": str(e)})
+
+
+# =========================================================================
+# DISCOM & UTILITY OPERATIONAL TOOLS
+# =========================================================================
+
+DISCOM_DISTRICT_MAP = {
+    "tpwodl": ["sambalpur", "bargarh", "jharsuguda", "deogarh", "sundargarh", "balangir", "subarnapur", "kalahandi", "nuapada", "boudh"],
+    "tpsodl": ["ganjam", "gajapati", "rayagada", "koraput", "nabarangpur", "malkangiri", "kandhamal"],
+    "tpnodl": ["balasore", "bhadrak", "mayurbhanj", "kendujhar", "jajpur"],
+    "tpcodl": ["cuttack", "puri", "khordha", "nayagarh", "kendrapara", "jagatsinghpur", "dhenkanal"],
+    "bescom": ["bengaluru urban", "bengaluru rural", "chikkaballapura", "kolar", "ramanagara", "tumakuru", "chitradurga", "davanagere"],
+    "msedcl_mumbai": ["mumbai suburban", "thane", "palghar", "raigad"]
+}
+
+@tool
+def extract_discom_network(
+    discom_name: str,
+    output_layer_id: str,
+    output_layer_name: Optional[str] = None
+) -> str:
+    """
+    Extracts and materializes the complete electrical infrastructure (substations, feeders, switchgear)
+    for a specific Indian Distribution Company (DISCOM) operational territory (e.g. 'TPWODL', 'TPSODL', 'BESCOM').
+    """
+    safe_out = output_layer_id.strip().lower().replace(" ", "_")
+    layer_name = output_layer_name or f"{discom_name.upper()} Utility Network"
+    clean_key = discom_name.strip().lower()
+
+    districts = DISCOM_DISTRICT_MAP.get(clean_key)
+    
+    # Fallback: fuzzy search district or discom keyword
+    if not districts:
+        for k, v in DISCOM_DISTRICT_MAP.items():
+            if clean_key in k or k in clean_key:
+                districts = v
+                clean_key = k
+                break
+
+    try:
+        if districts:
+            dist_filter = ", ".join([f"'{d}'" for d in districts])
+            boundary_query = f"lower(district_name) IN ({dist_filter})"
+        else:
+            # If not in preset dictionary, assume state or direct district name
+            boundary_query = f"lower(district_name) LIKE '%{clean_key}%' OR lower(state_name) LIKE '%{clean_key}%'"
+
+        sql_extract = f"""
+            CREATE OR REPLACE TABLE {safe_out} AS
+            WITH discom_boundary AS (
+                SELECT ST_Union_Agg(geom) AS geom
+                FROM india_districts
+                WHERE {boundary_query}
+            ),
+            subs AS (
+                SELECT 
+                    s.substation_id AS asset_id,
+                    s.substation_name AS asset_name,
+                    s.voltage_kv,
+                    'Substation' AS asset_type,
+                    s.geom
+                FROM utility_substations_master s, discom_boundary b
+                WHERE ST_Intersects(s.geom, b.geom)
+            ),
+            feeders AS (
+                SELECT 
+                    f.feeder_id AS asset_id,
+                    f.feeder_name AS asset_name,
+                    f.voltage_kv,
+                    'Feeder' AS asset_type,
+                    ST_Intersection(f.geom, b.geom) AS geom
+                FROM utility_feeders_master f, discom_boundary b
+                WHERE ST_Intersects(f.geom, b.geom)
+                  AND ST_GeometryType(ST_Intersection(f.geom, b.geom)) IN ('LINESTRING', 'MULTILINESTRING')
+            )
+            SELECT * FROM subs
+            UNION ALL
+            SELECT * FROM feeders;
+        """
+        
+        spatial_engine.con.execute(sql_extract)
+        count = spatial_engine.con.execute(f"SELECT COUNT(*) FROM {safe_out};").fetchone()[0]
+
+        summary = spatial_engine.con.execute(f"""
+            SELECT 
+                COUNT(*) FILTER (WHERE asset_type = 'Substation') AS total_subs,
+                COUNT(*) FILTER (WHERE asset_type = 'Feeder') AS total_feeders,
+                COALESCE(MAX(voltage_kv), 0.0) AS max_kv
+            FROM {safe_out};
+        """).fetchone()
+
+        catalog_manager.register_layer(
+            layer_id=safe_out,
+            name=layer_name,
+            table_name=safe_out,
+            geom_type="GEOMETRYCOLLECTION",
+            feature_count=count,
+            description=f"Active grid infrastructure across {clean_key.upper()} jurisdiction ({summary[0]} substations, {summary[1]} feeders)."
+        )
+
+        return json.dumps({
+            "status": "success",
+            "layer_id": safe_out,
+            "discom": clean_key.upper(),
+            "feature_count": count,
+            "substations_count": summary[0],
+            "feeders_count": summary[1],
+            "max_voltage_kv": summary[2],
+            "message": f"Successfully materialized {count} utility assets for {clean_key.upper()} ({summary[0]} substations, {summary[1]} feeders)."
+        })
+
+    except Exception as e:
+        logger.error(f"Failed to extract discom network: {e}")
+        return json.dumps({"status": "error", "message": str(e)})
+
+
+@tool
+def analyze_discom_reliability(
+    discom_layer_id: str,
+    output_layer_id: str,
+    output_layer_name: Optional[str] = None
+) -> str:
+    """
+    Performs network reliability and radial vulnerability analysis on an extracted DISCOM network.
+    Flags single-source radial feeders and vulnerable child nodes lacking dual-infeed redundancy.
+    """
+    safe_discom = discom_layer_id.strip().lower().replace(" ", "_")
+    safe_out = output_layer_id.strip().lower().replace(" ", "_")
+    layer_name = output_layer_name or f"Vulnerability Analysis: {safe_discom}"
+
+    try:
+        sql = f"""
+            CREATE OR REPLACE TABLE {safe_out} AS
+            WITH discom_feeders AS (
+                SELECT * FROM {safe_discom} WHERE asset_type = 'Feeder'
+            ),
+            discom_subs AS (
+                SELECT * FROM {safe_discom} WHERE asset_type = 'Substation'
+            ),
+            sub_connectivity AS (
+                SELECT 
+                    s.asset_id,
+                    s.asset_name,
+                    s.voltage_kv,
+                    s.geom,
+                    COUNT(f.asset_id) AS feeder_connections
+                FROM discom_subs s
+                LEFT JOIN discom_feeders f ON ST_DWithin(s.geom, f.geom, 0.015)
+                GROUP BY s.asset_id, s.asset_name, s.voltage_kv, s.geom
+            )
+            SELECT 
+                asset_id,
+                asset_name,
+                voltage_kv,
+                CASE 
+                    WHEN feeder_connections <= 1 THEN 'RADIAL_VULNERABLE'
+                    ELSE 'MESHED_REDUNDANT'
+                END AS reliability_status,
+                geom
+            FROM sub_connectivity;
+        """
+        spatial_engine.con.execute(sql)
+        count = spatial_engine.con.execute(f"SELECT COUNT(*) FROM {safe_out};").fetchone()[0]
+        vulnerable_count = spatial_engine.con.execute(f"SELECT COUNT(*) FROM {safe_out} WHERE reliability_status = 'RADIAL_VULNERABLE';").fetchone()[0]
+
+        catalog_manager.register_layer(
+            layer_id=safe_out,
+            name=layer_name,
+            table_name=safe_out,
+            geom_type="POINT",
+            feature_count=count,
+            description=f"Reliability screening for {safe_discom}: {vulnerable_count} radial vulnerable substations identified."
+        )
+
+        return json.dumps({
+            "status": "success",
+            "layer_id": safe_out,
+            "total_substations_screened": count,
+            "vulnerable_radial_substations": vulnerable_count,
+            "message": f"Reliability analysis complete. Found {vulnerable_count} radial single-infeed substations vulnerable to N-1 feeder trips."
+        })
+
+    except Exception as e:
+        logger.error(f"Reliability analysis failed: {e}")
+        return json.dumps({"status": "error", "message": str(e)})

@@ -1,11 +1,16 @@
+"""
+Spatial and Topological Toolchain for GeoAgent.
+"""
 from backend.app.tools.spatial_ops import (
     list_available_layers,
     get_layer_schema,
     filter_by_admin_boundary,
+    find_near_place,
     buffer_layer,
     spatial_intersection,
     spatial_difference,
     spatial_filter_within,
+    execute_custom_spatial_sql,
     delete_layer,
     delete_layers_matching,
     calculate_evacuation_route,
@@ -19,17 +24,20 @@ from backend.app.tools.spatial_ops import (
     trace_utility_downstream,
     simulate_grid_outage,
     filter_utility_network,
+    extract_discom_network,
+    analyze_discom_reliability,
 )
-from backend.app.tools.sql_runner import run_attribute_sql, run_spatial_sql
 
 ALL_SPATIAL_TOOLS = [
     list_available_layers,
     get_layer_schema,
     filter_by_admin_boundary,
+    find_near_place,
     buffer_layer,
     spatial_intersection,
     spatial_difference,
     spatial_filter_within,
+    execute_custom_spatial_sql,
     delete_layer,
     delete_layers_matching,
     calculate_evacuation_route,
@@ -43,19 +51,20 @@ ALL_SPATIAL_TOOLS = [
     trace_utility_downstream,
     simulate_grid_outage,
     filter_utility_network,
-    run_spatial_sql,
-    run_attribute_sql,
+    extract_discom_network,
+    analyze_discom_reliability,
 ]
 
 __all__ = [
-    "ALL_SPATIAL_TOOLS",
     "list_available_layers",
     "get_layer_schema",
     "filter_by_admin_boundary",
+    "find_near_place",
     "buffer_layer",
     "spatial_intersection",
     "spatial_difference",
     "spatial_filter_within",
+    "execute_custom_spatial_sql",
     "delete_layer",
     "delete_layers_matching",
     "calculate_evacuation_route",
@@ -69,6 +78,7 @@ __all__ = [
     "trace_utility_downstream",
     "simulate_grid_outage",
     "filter_utility_network",
-    "run_spatial_sql",
-    "run_attribute_sql",
+    "extract_discom_network",
+    "analyze_discom_reliability",
+    "ALL_SPATIAL_TOOLS",
 ]
