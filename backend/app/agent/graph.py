@@ -28,7 +28,7 @@ if not groq_key:
 
 logger.info(f"Initialized ChatGroq with key prefix: {groq_key[:7] if groq_key else 'MISSING'}")
 
-# Model Cascade Definitions
+# Model Cascade verified against account access
 primary_llm = ChatGroq(
     model="openai/gpt-oss-120b",
     temperature=0,
@@ -45,9 +45,8 @@ fallback_llm_1 = ChatGroq(
     groq_api_key=groq_key,
 ).bind_tools(ALL_SPATIAL_TOOLS)
 
-# Use a valid Groq endpoint for fallback 2
 fallback_llm_2 = ChatGroq(
-    model="llama-3.1-8b-instant",
+    model="qwen/qwen3.8-27b",
     temperature=0,
     max_tokens=1000,
     max_retries=0,
@@ -65,21 +64,34 @@ async def agent_node(state: AgentState):
     for m in raw_messages:
         if getattr(m, "type", "") == "tool":
             has_prior_tool = True
-            tool_name = getattr(m, "name", "tool_result") or "tool_result"
+            tool_name = getattr(m, "name", None)
+            if not tool_name:
+                for prev in reversed(raw_messages):
+                    if hasattr(prev, "tool_calls") and prev.tool_calls:
+                        for tc in prev.tool_calls:
+                            if tc.get("id") == m.tool_call_id:
+                                tool_name = tc.get("name")
+                                break
+                    if tool_name:
+                        break
+            tool_name = tool_name or "spatial_tool"
+
             try:
-                data = json.loads(m.content)
-                summary = {k: v for k, v in data.items() if k in ("status", "layer_id", "feature_count", "message")}
-                pruned_messages.append(ToolMessage(
-                    content=json.dumps(summary),
-                    name=tool_name,
-                    tool_call_id=m.tool_call_id
-                ))
+                data = json.loads(m.content) if isinstance(m.content, str) else m.content
+                if isinstance(data, dict):
+                    summary = {k: v for k, v in data.items() if k in ("status", "layer_id", "feature_count", "message")}
+                    content_str = json.dumps(summary)
+                else:
+                    content_str = str(data)[:250]
             except Exception:
-                pruned_messages.append(ToolMessage(
-                    content=str(m.content)[:250],
-                    name=tool_name,
-                    tool_call_id=m.tool_call_id
-                ))
+                content_str = str(m.content)[:250]
+
+            pruned_messages.append(ToolMessage(
+                content=content_str,
+                name=tool_name,
+                tool_call_id=m.tool_call_id,
+                additional_kwargs={"name": tool_name}
+            ))
         else:
             pruned_messages.append(m)
 
@@ -96,7 +108,7 @@ async def agent_node(state: AgentState):
             response = await llm_instance.ainvoke(messages)
             return {"messages": [response]}
         except RateLimitError as e:
-            logger.warning(f"Rate limit hit on {llm_instance.model_name}: {e}. Trying next...")
+            logger.warning(f"Rate limit hit on {llm_instance.model_name}: {e}. Trying next fallback...")
             await asyncio.sleep(2)
             continue
         except Exception as e:
