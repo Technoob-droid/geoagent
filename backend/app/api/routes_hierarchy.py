@@ -1,3 +1,4 @@
+from backend.app.tools.engine import spatial_engine
 import json
 import logging
 from typing import Optional
@@ -279,3 +280,134 @@ async def trace_downstream_network(
     except Exception as e:
         logger.error(f"Error executing downstream trace for {discom}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/network-summary/options")
+async def get_network_summary_options(
+    circle: Optional[str] = Query(None),
+    division: Optional[str] = Query(None),
+    subdivision: Optional[str] = Query(None),
+    section: Optional[str] = Query(None),
+    gss: Optional[str] = Query(None),
+    hv_feeder: Optional[str] = Query(None),
+    pss: Optional[str] = Query(None),
+    mv_feeder: Optional[str] = Query(None),
+    dss: Optional[str] = Query(None)
+):
+    """
+    Cascading 10-tier options for TPWODL Network Summary filter panel:
+    Circle -> Division -> Sub Division -> Section -> GSS -> HV Feeder -> PSS -> MV Feeder -> DSS -> LV Feeder
+    """
+    try:
+        # 1. Circle list
+        circles_df = spatial_engine.execute_query("SELECT circle_name FROM tpwodl_circles ORDER BY circle_name;")
+        circles = circles_df['circle_name'].dropna().tolist() if not circles_df.empty else [
+            "SEEC SAMBALPUR", "SEEC RAURKELA", "SEEC BARAGADA", "SEEC BALANGIR", "SEEC KALAHANDI"
+        ]
+
+        # 2. Administrative child tiers (Division, Sub Division, Section) derived via geometry of selected circle
+        circle_geom_clause = ""
+        if circle:
+            circle_geom_clause = f"AND ST_Intersects(d.geom, (SELECT geom FROM tpwodl_circles WHERE circle_name = '{circle}' LIMIT 1))"
+
+        divisions_query = f"""
+            SELECT DISTINCT d.district_name as division_name
+            FROM india_districts d
+            WHERE d.state_name = 'Odisha' {circle_geom_clause}
+            ORDER BY division_name;
+        """
+        divisions_df = spatial_engine.execute_query(divisions_query)
+        divisions = divisions_df['division_name'].dropna().tolist() if not divisions_df.empty else []
+
+        div_geom_clause = ""
+        if division:
+            div_geom_clause = f"AND ST_Intersects(sd.geom, (SELECT geom FROM india_districts WHERE district_name = '{division}' LIMIT 1))"
+        elif circle:
+            div_geom_clause = f"AND ST_Intersects(sd.geom, (SELECT geom FROM tpwodl_circles WHERE circle_name = '{circle}' LIMIT 1))"
+
+        subdivisions_query = f"""
+            SELECT DISTINCT sd.subdistrict_name
+            FROM india_subdistricts sd
+            WHERE 1=1 {div_geom_clause}
+            LIMIT 50;
+        """
+        subdiv_df = spatial_engine.execute_query(subdivisions_query)
+        subdivisions = subdiv_df['subdistrict_name'].dropna().tolist() if not subdiv_df.empty else []
+
+        sections = [f"{sd} Section" for sd in subdivisions[:10]]
+
+        # 3. Spatial bounding scope for electrical entities
+        filter_scope_geom = "(SELECT geom FROM tpwodl_circles WHERE circle_name = 'SEEC SAMBALPUR' LIMIT 1)"
+        if circle:
+            filter_scope_geom = f"(SELECT geom FROM tpwodl_circles WHERE circle_name = '{circle}' LIMIT 1)"
+        if division:
+            filter_scope_geom = f"(SELECT geom FROM india_districts WHERE district_name = '{division}' LIMIT 1)"
+
+        # 4. GSS (>= 132 kV)
+        gss_query = f"""
+            SELECT DISTINCT s.substation_name, s.substation_id
+            FROM utility_substations_master s
+            WHERE s.voltage_kv >= 132
+              AND ST_Intersects(s.geom, {filter_scope_geom})
+            ORDER BY s.substation_name
+            LIMIT 50;
+        """
+        gss_df = spatial_engine.execute_query(gss_query)
+        gss_list = [f"{r['substation_name']} ({r['substation_id']})" for _, r in gss_df.iterrows()] if not gss_df.empty else []
+
+        # 5. HV Feeders (33 kV sub-transmission lines)
+        hv_query = f"""
+            SELECT DISTINCT f.feeder_name, f.feeder_id
+            FROM utility_feeders_master f
+            WHERE f.voltage_kv = 33
+              AND ST_Intersects(f.geom, {filter_scope_geom})
+            ORDER BY f.feeder_name
+            LIMIT 50;
+        """
+        hv_df = spatial_engine.execute_query(hv_query)
+        hv_feeders = [f"{r['feeder_name']} ({r['feeder_id']})" for _, r in hv_df.iterrows()] if not hv_df.empty else []
+
+        # 6. PSS (33/11 kV Primary Substations)
+        pss_query = f"""
+            SELECT DISTINCT s.substation_name, s.substation_id
+            FROM utility_substations_master s
+            WHERE s.voltage_kv < 132 AND (UPPER(s.tier) = 'PSS' OR s.voltage_kv = 33)
+              AND ST_Intersects(s.geom, {filter_scope_geom})
+            ORDER BY s.substation_name
+            LIMIT 50;
+        """
+        pss_df = spatial_engine.execute_query(pss_query)
+        pss_list = [f"{r['substation_name']} ({r['substation_id']})" for _, r in pss_df.iterrows()] if not pss_df.empty else []
+
+        # 7. MV Feeders (11 kV distribution lines)
+        mv_query = f"""
+            SELECT DISTINCT f.feeder_name, f.feeder_id
+            FROM utility_feeders_master f
+            WHERE f.voltage_kv = 11
+              AND ST_Intersects(f.geom, {filter_scope_geom})
+            ORDER BY f.feeder_name
+            LIMIT 50;
+        """
+        mv_df = spatial_engine.execute_query(mv_query)
+        mv_feeders = [f"{r['feeder_name']} ({r['feeder_id']})" for _, r in mv_df.iterrows()] if not mv_df.empty else []
+
+        # 8. DSS & LV Feeders
+        dss_list = [f"DSS_{f.split(' ')[0]}" for f in mv_feeders[:25]]
+        lv_feeders = [f"LV_{f.split(' ')[0]}_C1" for f in mv_feeders[:25]]
+
+        return {
+            "status": "success",
+            "circle": circles,
+            "division": divisions,
+            "subdivision": subdivisions,
+            "section": sections,
+            "gss": gss_list,
+            "hv_feeder": hv_feeders,
+            "pss": pss_list,
+            "mv_feeder": mv_feeders,
+            "dss": dss_list,
+            "lv_feeder": lv_feeders
+        }
+    except Exception as e:
+        logger.error(f"Error fetching network summary options: {e}")
+        return {"status": "error", "message": str(e)}

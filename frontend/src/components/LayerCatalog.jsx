@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import NetworkSummaryModal from './NetworkSummaryModal';
 import {
   Layers,
   Eye,
@@ -34,6 +35,7 @@ export default function LayerCatalog({
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [activeExportMenu, setActiveExportMenu] = useState(null);
   const [showDiscomMenu, setShowDiscomMenu] = useState(false);
+  const [isNetworkModalOpen, setIsNetworkModalOpen] = useState(false);
   const [traceSubstation, setTraceSubstation] = useState('');
 
   const isPointLayer = (geomType) => {
@@ -122,17 +124,14 @@ export default function LayerCatalog({
             <span>TPWODL 9-Tier Hierarchy</span>
             <span className="text-[10px] text-slate-500 uppercase tracking-widest">Select Tier</span>
           </div>
-          <div className="grid grid-cols-3 gap-1 mb-3">
-            {['Circle', 'Division', 'Subdivision', 'Section', 'GSS', 'PSS', 'DSS', 'Feeders', 'Consumers'].map(tier => (
-              <button
-                key={tier}
-                onClick={() => onLoadHierarchy(tier)}
-                className="py-1 px-2 bg-slate-800 hover:bg-indigo-600 hover:text-white rounded border border-slate-700 text-center transition-colors truncate"
-                title={`Load ${tier}`}
-              >
-                {tier}
-              </button>
-            ))}
+          <div className="mb-3">
+            <button
+              onClick={() => setIsNetworkModalOpen(true)}
+              className="w-full py-1.5 px-3 bg-sky-600/90 hover:bg-sky-500 text-white font-medium rounded border border-sky-400/30 flex items-center justify-center space-x-2 text-xs shadow transition-colors"
+            >
+              <Zap className="w-3.5 h-3.5" />
+              <span>Open Network Summary (10-Tier)</span>
+            </button>
           </div>
           
           <div className="border-t border-slate-700/50 pt-2 mt-1">
@@ -343,6 +342,20 @@ export default function LayerCatalog({
           })
         )}
       </div>
+      {/* 10-Tier TPWODL Cascading Modal */}
+      <NetworkSummaryModal
+        isOpen={isNetworkModalOpen}
+        onClose={() => setIsNetworkModalOpen(false)}
+        onSubmitFilter={(filter) => {
+          if (filter.pss) {
+            onRunTrace(filter.pss);
+          } else if (filter.gss) {
+            onRunTrace(filter.gss);
+          } else if (filter.circle) {
+            onLoadHierarchy('Circle');
+          }
+        }}
+      />
     </div>
   );
 }
