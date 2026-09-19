@@ -1981,17 +1981,50 @@ def inspect_discom_hierarchy(
 
         spatial_engine.con.execute(f"DROP TABLE IF EXISTS {safe_out};")
 
-        circle_cte = """
-            SELECT 'SEEC RAURKELA' AS circle_name, 'SUNDARGARH' AS district_name, '#FFF59D' AS fill_color, '#FBC02D' AS border_color UNION ALL
-            SELECT 'SEEC SAMBALPUR', 'SAMBALPUR', '#E040FB', '#AA00FF' UNION ALL
-            SELECT 'SEEC SAMBALPUR', 'JHARSUGUDA', '#E040FB', '#AA00FF' UNION ALL
-            SELECT 'SEEC SAMBALPUR', 'DEBAGARH', '#E040FB', '#AA00FF' UNION ALL
-            SELECT 'SEEC BARAGADA', 'BARGARH', '#FFA726', '#F57C00' UNION ALL
-            SELECT 'SEEC BALANGIR', 'BALANGIR', '#90A4AE', '#607D8B' UNION ALL
-            SELECT 'SEEC BALANGIR', 'SUBARNAPUR', '#90A4AE', '#607D8B' UNION ALL
-            SELECT 'SEEC KALAHANDI', 'KALAHANDI', '#18FFFF', '#00B0FF' UNION ALL
-            SELECT 'SEEC KALAHANDI', 'NUAPADA', '#18FFFF', '#00B0FF'
-        """
+        DISCOM_DEFINITIONS = {
+            "TPWODL": [
+                ("SEEC RAURKELA", "SUNDARGARH", "#FFF59D", "#FBC02D"),
+                ("SEEC SAMBALPUR", "SAMBALPUR", "#E040FB", "#AA00FF"),
+                ("SEEC SAMBALPUR", "JHARSUGUDA", "#E040FB", "#AA00FF"),
+                ("SEEC SAMBALPUR", "DEBAGARH", "#E040FB", "#AA00FF"),
+                ("SEEC BARAGADA", "BARGARH", "#FFA726", "#F57C00"),
+                ("SEEC BALANGIR", "BALANGIR", "#90A4AE", "#607D8B"),
+                ("SEEC BALANGIR", "SUBARNAPUR", "#90A4AE", "#607D8B"),
+                ("SEEC KALAHANDI", "KALAHANDI", "#18FFFF", "#00B0FF"),
+                ("SEEC KALAHANDI", "NUAPADA", "#18FFFF", "#00B0FF"),
+            ],
+            "TPCODL": [
+                ("CDDR BHUBANESWAR", "KHORDHA", "#00E5FF", "#00B0FF"),
+                ("CDDR CUTTACK", "CUTTACK", "#76FF03", "#64DD17"),
+                ("CDDR PURI", "PURI", "#FFD600", "#FFAB00"),
+                ("CDDR PURI", "NAYAGARH", "#FFD600", "#FFAB00"),
+                ("CDDR PARADIP", "JAGATSINGHPUR", "#FF4081", "#F50057"),
+                ("CDDR PARADIP", "KENDRAPARA", "#FF4081", "#F50057"),
+                ("CDDR DHENKANAL", "DHENKANAL", "#B388FF", "#7C4DFF"),
+                ("CDDR DHENKANAL", "ANUGUL", "#B388FF", "#7C4DFF"),
+            ],
+            "TPSODL": [
+                ("SEEC BERHAMPUR", "GANJAM", "#00E676", "#00C853"),
+                ("SEEC ASKA", "GAJAPATI", "#FF6E40", "#FF3D00"),
+                ("SEEC BHANJANAGAR", "BOUDH", "#FFD740", "#FFC400"),
+                ("SEEC BHANJANAGAR", "KANDHAMAL", "#FFD740", "#FFC400"),
+                ("SEEC RAYAGADA", "RAYAGADA", "#40C4FF", "#00B0FF"),
+                ("SEEC JEYPORE", "KORAPUT", "#EA80FC", "#AA00FF"),
+                ("SEEC JEYPORE", "MALKANGIRI", "#EA80FC", "#AA00FF"),
+                ("SEEC NABARANGPUR", "NABARANGAPUR", "#B2FF59", "#76FF03"),
+            ],
+            "TPNODL": [
+                ("NEEC BALASORE", "BALESHWAR", "#FF80AB", "#FF4081"),
+                ("NEEC BHADRAK", "BHADRAK", "#82B1FF", "#448AFF"),
+                ("NEEC BARIPADA", "MAYURBHANJ", "#B9F6CA", "#69F0AE"),
+                ("NEEC JAJPUR", "JAJAPUR", "#FFE57F", "#FFD740"),
+                ("NEEC JAJPUR", "KENDUJHAR", "#FFE57F", "#FFD740"),
+            ]
+        }
+
+        selected_defs = DISCOM_DEFINITIONS.get(safe_discom, DISCOM_DEFINITIONS["TPWODL"])
+        cte_rows = [f"SELECT '{c}' AS circle_name, '{d}' AS district_name, '{fc}' AS fill_color, '{bc}' AS border_color" for c, d, fc, bc in selected_defs]
+        circle_cte = " UNION ALL ".join(cte_rows)
 
         target_clause = ""
         if target_circle:
@@ -2059,7 +2092,7 @@ def inspect_discom_hierarchy(
             """
             geom_type = "MULTIPOLYGON"
 
-        elif norm_level in ["subdivision", "section"]:
+        elif norm_level in ["subdivision", "sub_division", "section"]:
             sql = f"""
             CREATE TABLE {safe_out} AS
             WITH circle_def AS ({circle_cte})
@@ -2204,6 +2237,26 @@ def inspect_discom_hierarchy(
             JOIN filtered_districts fd ON ST_Intersects(v.geom, fd.geom);
             """
             geom_type = "POINT"
+
+        elif norm_level in ["all", "discom", "tpwodl"]:
+            sql = f"""
+            CREATE TABLE {safe_out} AS
+            WITH circle_def AS ({circle_cte}),
+            filtered_districts AS (
+                SELECT DISTINCT d.geom, '{safe_discom}' AS discom_name
+                FROM circle_def m
+                JOIN india_districts d
+                  ON UPPER(d.district_name) = m.district_name
+                 AND UPPER(d.state_name) = 'ODISHA'
+            )
+            SELECT
+                discom_name,
+                'DISCOM' AS hierarchy_level,
+                ST_Union_Agg(geom) AS geom
+            FROM filtered_districts
+            GROUP BY discom_name;
+            """
+            geom_type = "MULTIPOLYGON"
 
         else:
             return json.dumps({

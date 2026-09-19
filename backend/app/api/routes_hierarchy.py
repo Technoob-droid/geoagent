@@ -390,6 +390,7 @@ async def trace_downstream_network(
 
 @router.get("/network-summary/options")
 async def get_network_summary_options(
+    discom: str = Query("TPWODL", description="Target DISCOM: TPWODL, TPCODL, TPSODL, TPNODL"),
     circle: Optional[str] = Query(None),
     division: Optional[str] = Query(None),
     subdivision: Optional[str] = Query(None),
@@ -401,18 +402,40 @@ async def get_network_summary_options(
     dss: Optional[str] = Query(None)
 ):
     """
-    Cascading 10-tier options for TPWODL Network Summary filter panel:
-    Circle -> Division -> Sub Division -> Section -> GSS -> HV Feeder -> PSS -> MV Feeder -> DSS -> LV Feeder
+    Cascading 10-tier options for any Odisha DISCOM Network Summary filter panel.
     """
     try:
-        # 1. Circle mapping & definition
-        CIRCLE_DISTRICTS = {
-            "SEEC SAMBALPUR": ["Sambalpur", "Jharsuguda", "Debagarh"],
-            "SEEC RAURKELA": ["Sundargarh"],
-            "SEEC BARAGADA": ["Bargarh"],
-            "SEEC BALANGIR": ["Balangir", "Subarnapur"],
-            "SEEC KALAHANDI": ["Kalahandi", "Nuapada"]
+        DISCOM_MAP = {
+            "TPWODL": {
+                "SEEC SAMBALPUR": ["Sambalpur", "Jharsuguda", "Debagarh"],
+                "SEEC RAURKELA": ["Sundargarh"],
+                "SEEC BARAGADA": ["Bargarh"],
+                "SEEC BALANGIR": ["Balangir", "Subarnapur"],
+                "SEEC KALAHANDI": ["Kalahandi", "Nuapada"]
+            },
+            "TPCODL": {
+                "CDDR BHUBANESWAR": ["Khordha"],
+                "CDDR CUTTACK": ["Cuttack"],
+                "CDDR PURI": ["Puri", "Nayagarh"],
+                "CDDR PARADIP": ["Jagatsinghpur", "Kendrapara"],
+                "CDDR DHENKANAL": ["Dhenkanal", "Anugul"]
+            },
+            "TPSODL": {
+                "SEEC BERHAMPUR": ["Ganjam"],
+                "SEEC ASKA": ["Gajapati"],
+                "SEEC BHANJANAGAR": ["Boudh", "Kandhamal"],
+                "SEEC RAYAGADA": ["Rayagada"],
+                "SEEC JEYPORE": ["Koraput", "Malkangiri"],
+                "SEEC NABARANGPUR": ["Nabarangapur"]
+            },
+            "TPNODL": {
+                "NEEC BALASORE": ["Baleshwar"],
+                "NEEC BHADRAK": ["Bhadrak"],
+                "NEEC BARIPADA": ["Mayurbhanj"],
+                "NEEC JAJPUR": ["Jajapur", "Kendujhar"]
+            }
         }
+        CIRCLE_DISTRICTS = DISCOM_MAP.get(discom.strip().upper(), DISCOM_MAP["TPWODL"])
         circles = list(CIRCLE_DISTRICTS.keys())
 
         # 2. Administrative child tiers (Division, Sub Division, Section)

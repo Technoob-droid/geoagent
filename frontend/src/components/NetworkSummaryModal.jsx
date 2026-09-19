@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { X, Layers } from 'lucide-react';
 
-export default function NetworkSummaryModal({ isOpen, onClose, onSubmitFilter }) {
+export default function NetworkSummaryModal({ isOpen, onClose, onSubmitFilter, selectedDiscom = 'TPWODL' }) {
   const [formData, setFormData] = useState({
     circle: '',
     division: '',
@@ -38,6 +38,7 @@ export default function NetworkSummaryModal({ isOpen, onClose, onSubmitFilter })
       setLoading(true);
       try {
         const params = new URLSearchParams();
+        params.append('discom', selectedDiscom);
         if (formData.circle) params.append('circle', formData.circle);
         if (formData.division) params.append('division', formData.division);
         if (formData.subdivision) params.append('subdivision', formData.subdivision);
@@ -193,11 +194,14 @@ export default function NetworkSummaryModal({ isOpen, onClose, onSubmitFilter })
                   className="w-full bg-white border border-slate-300 rounded px-2.5 py-1 text-xs text-slate-700 shadow-inner focus:outline-hidden focus:border-sky-500 focus:ring-1 focus:ring-sky-500 transition"
                 >
                   <option value="">{placeholder}</option>
-                  {opts.map((opt) => (
-                    <option key={opt} value={opt}>
-                      {opt}
-                    </option>
-                  ))}
+                  {(Array.isArray(opts) ? opts : []).map((opt, idx) => {
+                    const val = typeof opt === 'object' && opt !== null ? (opt.name || opt.id || JSON.stringify(opt)) : opt;
+                    return (
+                      <option key={`${val}-${idx}`} value={val}>
+                        {val}
+                      </option>
+                    );
+                  })}
                 </select>
               </div>
             </div>

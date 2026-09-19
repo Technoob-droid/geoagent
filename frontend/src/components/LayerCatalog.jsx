@@ -30,11 +30,15 @@ export default function LayerCatalog({
   onZoomToLayer,
   onExportLayer,
   onLoadHierarchy = (tier) => console.log('Load tier:', tier),
-  onRunTrace = (pssName) => console.log('Run trace:', pssName)
+  onRunTrace = (pssName) => console.log('Run trace:', pssName),
+  selectedDiscom = 'TPWODL',
+  onSelectDiscom = () => {},
+  onClearHierarchy = () => {}
 }) {
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [activeExportMenu, setActiveExportMenu] = useState(null);
-  const [showDiscomMenu, setShowDiscomMenu] = useState(false);
+  const [showDiscomMenu, setShowDiscomMenu] = useState(true);
+  const [isDiscomPickerOpen, setIsDiscomPickerOpen] = useState(false);
   const [isNetworkModalOpen, setIsNetworkModalOpen] = useState(false);
   const [traceSubstation, setTraceSubstation] = useState('');
 
@@ -120,17 +124,104 @@ export default function LayerCatalog({
 
       {showDiscomMenu && (
         <div className="p-3 bg-slate-800/50 border-b border-slate-800 text-xs text-slate-300">
-          <div className="font-semibold mb-2 text-slate-200 flex items-center justify-between">
-            <span>TPWODL 9-Tier Hierarchy</span>
+          <div className="font-semibold mb-2 text-slate-200 flex items-center justify-between relative">
+            <div className="flex items-center space-x-2">
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={() => setIsDiscomPickerOpen((prev) => !prev)}
+                  className="flex items-center space-x-1.5 px-2.5 py-1 rounded bg-sky-500/20 border border-sky-400/50 hover:bg-sky-500/30 text-sky-300 font-bold text-xs tracking-wider transition shadow-sm"
+                >
+                  <Zap className="w-3.5 h-3.5 text-sky-400" />
+                  <span>{selectedDiscom}</span>
+                  <ChevronDown className="w-3.5 h-3.5 text-sky-400" />
+                </button>
+                {isDiscomPickerOpen && (
+                  <div className="absolute left-0 mt-1.5 w-36 rounded-md shadow-2xl bg-slate-900 border border-slate-700 z-50 py-1 backdrop-blur-md">
+                    <div className="px-2.5 py-1 text-[10px] font-bold text-slate-400 uppercase tracking-wider border-b border-slate-800">
+                      Odisha DISCOMs
+                    </div>
+                    {['TPWODL', 'TPCODL', 'TPSODL', 'TPNODL'].map((d) => (
+                      <button
+                        key={d}
+                        type="button"
+                        onClick={() => {
+                          onSelectDiscom(d);
+                          setIsDiscomPickerOpen(false);
+                        }}
+                        className={`w-full text-left px-3 py-1.5 text-xs font-semibold hover:bg-sky-600/30 hover:text-sky-200 flex items-center justify-between transition ${
+                          selectedDiscom === d ? 'text-sky-400 bg-sky-950/60 font-bold' : 'text-slate-300'
+                        }`}
+                      >
+                        <span>{d}</span>
+                        {selectedDiscom === d && <span className="w-1.5 h-1.5 rounded-full bg-sky-400"></span>}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+              <span className="text-[11px] text-slate-400 font-normal">Hierarchy</span>
+            </div>
             <span className="text-[10px] text-slate-500 uppercase tracking-widest">Select Tier</span>
           </div>
-          <div className="mb-3">
+          <div className="mb-3 space-y-2">
             <button
               onClick={() => setIsNetworkModalOpen(true)}
               className="w-full py-1.5 px-3 bg-sky-600/90 hover:bg-sky-500 text-white font-medium rounded border border-sky-400/30 flex items-center justify-center space-x-2 text-xs shadow transition-colors"
             >
               <Zap className="w-3.5 h-3.5" />
               <span>Open Network Summary (10-Tier)</span>
+            </button>
+            <div className="grid grid-cols-2 gap-1 pt-1">
+              <button
+                onClick={() => onLoadHierarchy('all')}
+                className="px-2 py-1 bg-amber-600/30 hover:bg-amber-600/50 border border-amber-500/40 text-amber-200 text-[11px] font-medium rounded text-center transition"
+                title="Load TPWODL DISCOM Polygon Boundary"
+              >
+                DISCOM Boundary
+              </button>
+              <button
+                onClick={() => onLoadHierarchy('CIRCLE')}
+                className="px-2 py-1 bg-sky-600/30 hover:bg-sky-600/50 border border-sky-500/40 text-sky-200 text-[11px] font-medium rounded text-center transition"
+                title="Load TPWODL 5 Circles"
+              >
+                5 Circles
+              </button>
+              <button
+                onClick={() => onLoadHierarchy('DIVISION')}
+                className="px-2 py-1 bg-indigo-600/30 hover:bg-indigo-600/50 border border-indigo-500/40 text-indigo-200 text-[11px] font-medium rounded text-center transition"
+                title="Load TPWODL Divisions"
+              >
+                Divisions
+              </button>
+              <button
+                onClick={() => onLoadHierarchy('Subdivision')}
+                className="px-2 py-1 bg-violet-600/30 hover:bg-violet-600/50 border border-violet-500/40 text-violet-200 text-[11px] font-medium rounded text-center transition"
+                title="Load Sub-Divisions"
+              >
+                Sub-Divisions
+              </button>
+              <button
+                onClick={() => onLoadHierarchy('PSS')}
+                className="px-2 py-1 bg-emerald-600/30 hover:bg-emerald-600/50 border border-emerald-500/40 text-emerald-200 text-[11px] font-medium rounded text-center transition"
+                title="Load 33/11kV Substations"
+              >
+                PSS Substations
+              </button>
+              <button
+                onClick={() => onLoadHierarchy('FEEDER')}
+                className="px-2 py-1 bg-cyan-600/30 hover:bg-cyan-600/50 border border-cyan-500/40 text-cyan-200 text-[11px] font-medium rounded text-center transition"
+                title="Load 11kV Feeders"
+              >
+                11kV Feeders
+              </button>
+            </div>
+            <button
+              onClick={onClearHierarchy}
+              className="w-full mt-1.5 py-1 px-2 bg-rose-950/40 hover:bg-rose-900/60 border border-rose-700/50 text-rose-300 text-[11px] font-medium rounded flex items-center justify-center space-x-1.5 transition"
+              title="Clear all TPWODL tiers and boundaries from the map"
+            >
+              <span>✕ Clear Hierarchy Layers</span>
             </button>
           </div>
           
@@ -344,6 +435,7 @@ export default function LayerCatalog({
       </div>
       {/* 10-Tier TPWODL Cascading Modal */}
       <NetworkSummaryModal
+        selectedDiscom={selectedDiscom}
         isOpen={isNetworkModalOpen}
         onClose={() => setIsNetworkModalOpen(false)}
         onSubmitFilter={(filter) => {

@@ -651,6 +651,7 @@ export default function MapViewer({
           [
             `${id}-polygon-fill`,
             `${id}-polygon-stroke`,
+            `${id}-polygon-labels`,
             `${id}-line`,
             `${id}-collection-lines`,
             `${id}-collection-points`,
@@ -1109,6 +1110,45 @@ export default function MapViewer({
                       'line-opacity': alpha
                     }
                   });
+
+                if (!map.getLayer(`${layerId}-polygon-labels`)) {
+                  map.addLayer({
+                    id: `${layerId}-polygon-labels`,
+                    type: 'symbol',
+                    source: layerId,
+                    layout: {
+                      'text-field': [
+                        'coalesce',
+                        ['get', 'circle_name'],
+                        ['get', 'division_name'],
+                        ['get', 'subdivision_name'],
+                        ['get', 'section_name'],
+                        ['get', 'discom_name'],
+                        ['get', 'district_name'],
+                        ['get', 'feeder_name'],
+                        ['get', 'name'],
+                        ''
+                      ],
+                      'text-font': ['Open Sans Bold', 'Arial Unicode MS Bold'],
+                      'text-size': [
+                        'interpolate', ['linear'], ['zoom'],
+                        6, 12,
+                        9, 15,
+                        13, 18
+                      ],
+                      'text-anchor': 'center',
+                      'text-allow-overlap': false,
+                      'text-ignore-placement': false,
+                      visibility: isHidden ? 'none' : 'visible'
+                    },
+                    paint: {
+                      'text-color': '#ffffff',
+                      'text-halo-color': '#020617',
+                      'text-halo-width': 2.5,
+                      'text-halo-blur': 1.2
+                    }
+                  });
+                }
                 }
               }
 

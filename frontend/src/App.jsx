@@ -5,6 +5,7 @@ import LayerCatalog from './components/LayerCatalog';
 
 export default function App() {
   const [layers, setLayers] = useState([]);
+  const [selectedDiscom, setSelectedDiscom] = useState('TPWODL');
   const [hiddenLayers, setHiddenLayers] = useState(new Set());
   const [opacities, setOpacities] = useState({});
   const [displayModes, setDisplayModes] = useState({}); // { [layerId]: 'points' | 'clusters' | 'heatmap' }
@@ -176,21 +177,47 @@ const handleClearChat = async () => {
   };
 
 
+    const handleClearHierarchy = () => {
+    // 1. Remove from visible layers
+    setLayers((prev) => prev.filter((l) => !l.layer_id.startsWith(selectedDiscom.toLowerCase() + "_") && !l.layer_id.startsWith("Trace:")));
+    // 2. Remove from hidden layers set
+    setHiddenLayers((prev) => {
+      const next = new Set(prev);
+      for (const id of next) {
+        if (id.startsWith(selectedDiscom.toLowerCase() + "_") || id.startsWith("Trace:")) {
+          next.delete(id);
+        }
+      }
+      return next;
+    });
+  };
+
   const handleLoadHierarchy = async (tier) => {
     try {
-      const res = await fetch(`/api/hierarchy/TPWODL?level=${tier}`);
+      const res = await fetch(`/api/hierarchy/${selectedDiscom}?level=${tier}`);
       const data = await res.json();
       if (data && data.layer_id) {
-        setLayers((prev) => {
-          const exists = prev.some((l) => l.layer_id === data.layer_id);
-          if (exists) return prev;
-          return [...prev, data];
+        // Ensure layer is not hidden
+        setHiddenLayers((prev) => {
+          const next = new Set(prev);
+          next.delete(data.layer_id);
+          return next;
         });
+
+        // Add or replace layer in layers list
+        setLayers((prev) => {
+          const filtered = prev.filter((l) => l.layer_id !== data.layer_id);
+          return [...filtered, data];
+        });
+
         setOpacities((prev) => ({ ...prev, [data.layer_id]: 0.8 }));
         setDisplayModes((prev) => ({ ...prev, [data.layer_id]: 'points' }));
-        if (data.layer_id) {
+        
+        // Trigger zoom to freshly loaded tier
+        setZoomLayerId(null);
+        setTimeout(() => {
           setZoomLayerId(data.layer_id);
-        }
+        }, 100);
       }
     } catch (err) {
       console.error('Failed to load hierarchy tier:', err);
@@ -323,7 +350,10 @@ const handleClearChat = async () => {
           onDisplayModeChange={handleDisplayModeChange}
           onZoomToLayer={handleZoomToLayer}
           onExportLayer={handleExportLayer}
+          selectedDiscom={selectedDiscom}
+          onSelectDiscom={setSelectedDiscom}
           onLoadHierarchy={handleLoadHierarchy}
+          onClearHierarchy={handleClearHierarchy}
           onRunTrace={handleRunTrace}
         />
       </div>
