@@ -199,9 +199,13 @@ const handleClearChat = async () => {
 
   const handleRunTrace = async (substationOrDistrict) => {
     try {
-      const queryParam = substationOrDistrict?.trim()
-        ? `district_name=${encodeURIComponent(substationOrDistrict.trim())}`
-        : 'district_name=Sambalpur';
+      let target = substationOrDistrict?.trim() || 'Sambalpur';
+      // If user selected from dropdown format: "Substation-150791254 (PSS_150791254)"
+      const match = target.match(/\(([^)]+)\)/);
+      if (match) {
+        target = match[1]; // Extracts "PSS_150791254"
+      }
+      const queryParam = `substation_id=${encodeURIComponent(target)}&district_name=Sambalpur`;
       const res = await fetch(`/api/hierarchy/TPWODL/trace/downstream?${queryParam}`);
       const data = await res.json();
       if (data && data.status === 'success' && data.topology) {
@@ -255,7 +259,7 @@ const handleClearChat = async () => {
                 properties: {
                   name: c.village_name,
                   distance_km: c.distance_km,
-                  tier: 'Consumers',
+                  tier: 'Consumer',
                   type: 'Energized Consumer Node'
                 }
               });
@@ -263,18 +267,22 @@ const handleClearChat = async () => {
           });
         });
 
-        const traceLayerId = `downstream_trace_${Date.now()}`;
+        const traceLayerId = data.layer_id || `trace_tpwodl_${Date.now()}`;
         const newLayer = {
           layer_id: traceLayerId,
-          name: `Downstream Trace: ${data.root_substation?.substation_name || 'Substation'}`,
+          name: `Trace: ${data.root_substation?.substation_name || 'Substation'}`,
           geom_type: 'POINT',
           format: 'geojson',
-          data: traceGeoJson,
-          feature_count: traceGeoJson.features.length
+          data: `/api/layers/${traceLayerId}/geojson`,
+          feature_count: data.consumer_count ? (data.consumer_count + (data.feeder_count || 0) + 1) : traceGeoJson.features.length
         };
 
-        setLayers((prev) => [...prev, newLayer]);
-        setOpacities((prev) => ({ ...prev, [traceLayerId]: 0.9 }));
+        setLayers((prev) => {
+          // Clear any prior trace layers to avoid stale 404 requests
+          const filtered = prev.filter(l => !l.layer_id.startsWith('downstream_trace_') && !l.layer_id.startsWith('trace_'));
+          return [...filtered, newLayer];
+        });
+        setOpacities((prev) => ({ ...prev, [traceLayerId]: 1.0 }));
         setDisplayModes((prev) => ({ ...prev, [traceLayerId]: 'points' }));
         setZoomLayerId(traceLayerId);
       }

@@ -687,14 +687,14 @@ export default function MapViewer({
             if (useVectorTiles) {
               const tileUrl = `${window.location.origin}/api/layers/tiles/${layerId}/{z}/{x}/{y}.pbf`;
 
-              if (!map.getSource(layerId)) {
-                map.addSource(layerId, {
-                  type: 'vector',
-                  tiles: [tileUrl],
-                  minzoom: 0,
-                  maxzoom: 16
-                });
-              }
+                if (!map.getSource(layerId)) {
+                  map.addSource(layerId, {
+                    type: 'vector',
+                    tiles: [tileUrl],
+                    minzoom: 0,
+                    maxzoom: 16
+                  });
+                }
 
               const isLineLayer = geomType === 'LINESTRING' || geomType === 'MULTILINESTRING' || layerId.includes('feeder');
               const isVillageLayer = layerId.toLowerCase().includes('village');
@@ -794,51 +794,54 @@ export default function MapViewer({
               }
 
               if (!map.getSource(layerId)) {
+                const isTraceLayer = layerId.toLowerCase().includes('trace_') || layerId.toLowerCase().includes('downstream_');
                 map.addSource(layerId, {
                   type: 'geojson',
                   data,
-                  cluster: isPoint && activeGeom !== 'GEOMETRYCOLLECTION',
+                  cluster: isPoint && activeGeom !== 'GEOMETRYCOLLECTION' && !isTraceLayer,
                   clusterRadius: 50,
                   clusterMaxZoom: 14
                 });
               }
 
-              if (isPoint) {
-                const isSubstationMaster = layerId.toLowerCase().includes('substation');
-                const isSwitchgearMaster = layerId.toLowerCase().includes('switchgear');
+                if (activeGeom === 'POINT' || (isPoint && activeGeom !== 'GEOMETRYCOLLECTION')) {
+                  const isSubstationMaster = layerId.toLowerCase().includes('substation') || layerId.toLowerCase().includes('trace_');
+                  const isSwitchgearMaster = layerId.toLowerCase().includes('switchgear');
 
-                const circleColorExpr = isSubstationMaster
-                  ? [
-                      'match',
-                      ['coalesce', ['get', 'tier'], ''],
-                      'GSS', '#e11d48',
-                      'PSS', '#f59e0b',
-                      'DSS', '#10b981',
-                      color.fill
-                    ]
-                  : isSwitchgearMaster
-                  ? [
-                      'match',
-                      ['coalesce', ['get', 'status'], ''],
-                      'CLOSED', '#10b981',
-                      'OPEN', '#ef4444',
-                      'TRIPPED', '#f97316',
-                      color.fill
-                    ]
-                  : color.fill;
+                  const circleColorExpr = isSubstationMaster
+                    ? [
+                        'match',
+                        ['coalesce', ['get', 'tier'], ''],
+                        'GSS', '#e11d48',
+                        'PSS', '#f59e0b',
+                        'DSS', '#10b981',
+                        'Consumer', '#0ea5e9',
+                        color.fill
+                      ]
+                    : isSwitchgearMaster
+                    ? [
+                        'match',
+                        ['coalesce', ['get', 'status'], ''],
+                        'CLOSED', '#10b981',
+                        'OPEN', '#ef4444',
+                        'TRIPPED', '#f97316',
+                        color.fill
+                      ]
+                    : color.fill;
 
-                const circleRadiusExpr = isSubstationMaster
-                  ? [
-                      'match',
-                      ['coalesce', ['get', 'tier'], ''],
-                      'GSS', 9,
-                      'PSS', 6.5,
-                      'DSS', 4.5,
-                      8
-                    ]
-                  : isSwitchgearMaster
-                  ? 5.5
-                  : 8;
+                  const circleRadiusExpr = isSubstationMaster
+                    ? [
+                        'match',
+                        ['coalesce', ['get', 'tier'], ''],
+                        'GSS', 9,
+                        'PSS', 7,
+                        'DSS', 5,
+                        'Consumer', 3.5,
+                        8
+                      ]
+                    : isSwitchgearMaster
+                    ? 5.5
+                    : 8;
 
                 if (!map.getLayer(`${layerId}-point-circle`)) {
                   map.addLayer({
@@ -1004,14 +1007,29 @@ export default function MapViewer({
                     paint: {
                       'line-color': [
                         'match',
-                        ['coalesce', ['get', 'impact_status'], ''],
-                        'SEVERED_TRANSMISSION', '#ff3344',
-                        'FAILED_CORRIDOR', '#ff3344',
-                        '#ff5555'
+                        ['coalesce', ['get', 'tier'], ''],
+                        'Incoming Feeder', '#f59e0b',
+                        'Outgoing Feeder', '#06b6d4',
+                        'Conductor Span', '#94a3b8',
+                        'Connector Drop', '#10b981',
+                        '#38bdf8'
                       ],
-                      'line-width': 4.5,
-                      'line-dasharray': [2, 2],
-                      'line-opacity': 1.0
+                      'line-width': [
+                        'match',
+                        ['coalesce', ['get', 'tier'], ''],
+                        'Incoming Feeder', 4.0,
+                        'Outgoing Feeder', 3.0,
+                        'Conductor Span', 2.0,
+                        'Connector Drop', 1.5,
+                        2.5
+                      ],
+                      'line-dasharray': [
+                        'match',
+                        ['coalesce', ['get', 'tier'], ''],
+                        'Connector Drop', ['literal', [2, 2]],
+                        ['literal', [1]]
+                      ],
+                      'line-opacity': alpha
                     }
                   });
                 }
@@ -1024,16 +1042,27 @@ export default function MapViewer({
                     filter: ['==', '$type', 'Point'],
                     layout: { visibility: isHidden ? 'none' : 'visible' },
                     paint: {
-                      'circle-radius': 9,
+                      'circle-radius': [
+                        'match',
+                        ['coalesce', ['get', 'tier'], ''],
+                        'PSS', 8,
+                        'DSS', 6,
+                        'Pole', 3.5,
+                        'Consumer', 4,
+                        5
+                      ],
                       'circle-color': [
                         'match',
-                        ['coalesce', ['get', 'impact_status'], ''],
-                        'DE_ENERGIZED', '#ff1744',
-                        '#ff1744'
+                        ['coalesce', ['get', 'tier'], ''],
+                        'PSS', '#f59e0b',
+                        'DSS', '#10b981',
+                        'Pole', '#64748b',
+                        'Consumer', '#0ea5e9',
+                        '#f59e0b'
                       ],
-                      'circle-stroke-width': 2.5,
+                      'circle-stroke-width': 1.5,
                       'circle-stroke-color': '#ffffff',
-                      'circle-opacity': 1.0
+                      'circle-opacity': alpha
                     }
                   });
                 }
