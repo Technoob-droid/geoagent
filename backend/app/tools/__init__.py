@@ -26,6 +26,7 @@ from backend.app.tools.spatial_ops import (
     filter_utility_network,
     extract_discom_network,
     analyze_discom_reliability,
+    inspect_discom_hierarchy,
 )
 
 ALL_SPATIAL_TOOLS = [
@@ -53,6 +54,7 @@ ALL_SPATIAL_TOOLS = [
     filter_utility_network,
     extract_discom_network,
     analyze_discom_reliability,
+    inspect_discom_hierarchy,
 ]
 
 __all__ = [
@@ -80,5 +82,6 @@ __all__ = [
     "filter_utility_network",
     "extract_discom_network",
     "analyze_discom_reliability",
+    "inspect_discom_hierarchy",
     "ALL_SPATIAL_TOOLS",
 ]

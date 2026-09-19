@@ -1953,3 +1953,286 @@ def analyze_discom_reliability(
     except Exception as e:
         logger.error(f"Reliability analysis failed: {e}")
         return json.dumps({"status": "error", "message": str(e)})
+
+
+
+@tool
+def inspect_discom_hierarchy(
+    discom_name: str = "TPWODL",
+    level: str = "Circle",
+    target_circle: Optional[str] = None,
+    output_layer_id: Optional[str] = None
+) -> str:
+    """
+    Inspects, filters, and materializes operational and electrical assets across the 9 tiers
+    of a DISCOM hierarchy: Circle, Division, Subdivision, Section, GSS, PSS, DSS, Feeders, and Consumers.
+    
+    Args:
+        discom_name: Name of the utility provider (e.g. 'TPWODL').
+        level: Hierarchy level: 'Circle', 'Division', 'Subdivision', 'Section', 'GSS', 'PSS', 'DSS', 'Feeders', 'Consumers', or 'all'.
+        target_circle: Optional name of the specific Circle to filter down to (e.g. 'SEEC SAMBALPUR', 'SEEC RAURKELA').
+        output_layer_id: Custom layer ID for database and catalog registration. Defaults to auto-generated.
+    """
+    try:
+        norm_level = level.strip().lower()
+        safe_discom = discom_name.strip().upper()
+        safe_out = output_layer_id.strip().lower() if output_layer_id else f"{safe_discom.lower()}_{norm_level}_layer"
+        safe_out = re.sub(r'[^a-zA-Z0-9_]', '_', safe_out)
+
+        spatial_engine.con.execute(f"DROP TABLE IF EXISTS {safe_out};")
+
+        circle_cte = """
+            SELECT 'SEEC RAURKELA' AS circle_name, 'SUNDARGARH' AS district_name, '#FFF59D' AS fill_color, '#FBC02D' AS border_color UNION ALL
+            SELECT 'SEEC SAMBALPUR', 'SAMBALPUR', '#E040FB', '#AA00FF' UNION ALL
+            SELECT 'SEEC SAMBALPUR', 'JHARSUGUDA', '#E040FB', '#AA00FF' UNION ALL
+            SELECT 'SEEC SAMBALPUR', 'DEBAGARH', '#E040FB', '#AA00FF' UNION ALL
+            SELECT 'SEEC BARAGADA', 'BARGARH', '#FFA726', '#F57C00' UNION ALL
+            SELECT 'SEEC BALANGIR', 'BALANGIR', '#90A4AE', '#607D8B' UNION ALL
+            SELECT 'SEEC BALANGIR', 'SUBARNAPUR', '#90A4AE', '#607D8B' UNION ALL
+            SELECT 'SEEC KALAHANDI', 'KALAHANDI', '#18FFFF', '#00B0FF' UNION ALL
+            SELECT 'SEEC KALAHANDI', 'NUAPADA', '#18FFFF', '#00B0FF'
+        """
+
+        target_clause = ""
+        if target_circle:
+            target_clause = f"WHERE UPPER(circle_name) LIKE '%{target_circle.strip().upper()}%'"
+
+        if norm_level == "circle":
+            sql = f"""
+            CREATE TABLE {safe_out} AS
+            WITH circle_def AS ({circle_cte}),
+            filtered_def AS (
+                SELECT * FROM circle_def {target_clause}
+            ),
+            circle_geoms AS (
+                SELECT 
+                    m.circle_name,
+                    '{safe_discom}' AS discom,
+                    'Circle' AS hierarchy_level,
+                    m.fill_color,
+                    m.border_color,
+                    LIST(DISTINCT d.district_name) AS constituent_districts,
+                    ST_Union_Agg(d.geom) AS geom
+                FROM filtered_def m
+                JOIN india_districts d 
+                  ON UPPER(d.district_name) = m.district_name 
+                 AND UPPER(d.state_name) = 'ODISHA'
+                GROUP BY m.circle_name, m.fill_color, m.border_color
+            )
+            SELECT 
+                c.circle_name,
+                c.discom,
+                c.hierarchy_level,
+                c.fill_color,
+                c.border_color,
+                c.constituent_districts,
+                COUNT(DISTINCT s.substation_id) FILTER (WHERE s.voltage_kv >= 132 OR UPPER(s.tier) = 'GSS') AS gss_count,
+                COUNT(DISTINCT s.substation_id) FILTER (WHERE s.voltage_kv < 132 OR UPPER(s.tier) = 'PSS') AS pss_count,
+                COUNT(DISTINCT f.feeder_id) AS feeder_count,
+                c.geom
+            FROM circle_geoms c
+            LEFT JOIN utility_substations_master s ON ST_Intersects(s.geom, c.geom)
+            LEFT JOIN utility_feeders_master f ON ST_Intersects(f.geom, c.geom)
+            GROUP BY 
+                c.circle_name, c.discom, c.hierarchy_level, 
+                c.fill_color, c.border_color, c.constituent_districts, c.geom;
+            """
+            geom_type = "MULTIPOLYGON"
+
+        elif norm_level == "division":
+            sql = f"""
+            CREATE TABLE {safe_out} AS
+            WITH circle_def AS ({circle_cte})
+            SELECT 
+                d.district_name AS division_name,
+                m.circle_name AS parent_circle,
+                '{safe_discom}' AS discom,
+                'Division' AS hierarchy_level,
+                m.fill_color,
+                m.border_color,
+                d.geom
+            FROM circle_def m
+            JOIN india_districts d 
+              ON UPPER(d.district_name) = m.district_name 
+             AND UPPER(d.state_name) = 'ODISHA'
+            {target_clause};
+            """
+            geom_type = "MULTIPOLYGON"
+
+        elif norm_level in ["subdivision", "section"]:
+            sql = f"""
+            CREATE TABLE {safe_out} AS
+            WITH circle_def AS ({circle_cte})
+            SELECT 
+                s.subdistrict_name AS subdivision_name,
+                d.district_name AS parent_division,
+                m.circle_name AS parent_circle,
+                '{safe_discom}' AS discom,
+                '{norm_level.capitalize()}' AS hierarchy_level,
+                s.geom
+            FROM circle_def m
+            JOIN india_districts d 
+              ON UPPER(d.district_name) = m.district_name 
+             AND UPPER(d.state_name) = 'ODISHA'
+            JOIN india_subdistricts s 
+              ON ST_Intersects(d.geom, ST_Centroid(s.geom))
+            {target_clause};
+            """
+            geom_type = "MULTIPOLYGON"
+
+        elif norm_level == "gss":
+            sql = f"""
+            CREATE TABLE {safe_out} AS
+            WITH circle_def AS ({circle_cte}),
+            filtered_districts AS (
+                SELECT DISTINCT d.geom, m.circle_name
+                FROM circle_def m
+                JOIN india_districts d 
+                  ON UPPER(d.district_name) = m.district_name 
+                 AND UPPER(d.state_name) = 'ODISHA'
+                {target_clause}
+            )
+            SELECT 
+                s.substation_id,
+                s.substation_name,
+                s.voltage_kv,
+                'GSS' AS tier,
+                fd.circle_name AS parent_circle,
+                '{safe_discom}' AS discom,
+                s.geom
+            FROM utility_substations_master s
+            JOIN filtered_districts fd ON ST_Intersects(s.geom, fd.geom)
+            WHERE (s.voltage_kv >= 132 OR UPPER(s.tier) = 'GSS');
+            """
+            geom_type = "POINT"
+
+        elif norm_level == "pss":
+            sql = f"""
+            CREATE TABLE {safe_out} AS
+            WITH circle_def AS ({circle_cte}),
+            filtered_districts AS (
+                SELECT DISTINCT d.geom, m.circle_name
+                FROM circle_def m
+                JOIN india_districts d 
+                  ON UPPER(d.district_name) = m.district_name 
+                 AND UPPER(d.state_name) = 'ODISHA'
+                {target_clause}
+            )
+            SELECT 
+                s.substation_id,
+                s.substation_name,
+                s.voltage_kv,
+                'PSS' AS tier,
+                fd.circle_name AS parent_circle,
+                '{safe_discom}' AS discom,
+                s.geom
+            FROM utility_substations_master s
+            JOIN filtered_districts fd ON ST_Intersects(s.geom, fd.geom)
+            WHERE (s.voltage_kv < 132 OR UPPER(s.tier) = 'PSS');
+            """
+            geom_type = "POINT"
+
+        elif norm_level == "dss":
+            sql = f"""
+            CREATE TABLE {safe_out} AS
+            WITH circle_def AS ({circle_cte}),
+            filtered_districts AS (
+                SELECT DISTINCT d.geom, m.circle_name
+                FROM circle_def m
+                JOIN india_districts d 
+                  ON UPPER(d.district_name) = m.district_name 
+                 AND UPPER(d.state_name) = 'ODISHA'
+                {target_clause}
+            )
+            SELECT 
+                f.feeder_id || '_DSS' AS dss_id,
+                'DSS ' || COALESCE(f.feeder_name, f.feeder_id) AS dss_name,
+                11.0 AS voltage_kv,
+                'DSS' AS tier,
+                fd.circle_name AS parent_circle,
+                '{safe_discom}' AS discom,
+                ST_EndPoint(f.geom) AS geom
+            FROM utility_feeders_master f
+            JOIN filtered_districts fd ON ST_Intersects(f.geom, fd.geom);
+            """
+            geom_type = "POINT"
+
+        elif norm_level in ["feeder", "feeders"]:
+            sql = f"""
+            CREATE TABLE {safe_out} AS
+            WITH circle_def AS ({circle_cte}),
+            filtered_districts AS (
+                SELECT DISTINCT d.geom, m.circle_name
+                FROM circle_def m
+                JOIN india_districts d 
+                  ON UPPER(d.district_name) = m.district_name 
+                 AND UPPER(d.state_name) = 'ODISHA'
+                {target_clause}
+            )
+            SELECT 
+                f.feeder_id,
+                f.feeder_name,
+                f.voltage_kv,
+                fd.circle_name AS parent_circle,
+                '{safe_discom}' AS discom,
+                'Feeder' AS hierarchy_level,
+                f.geom
+            FROM utility_feeders_master f
+            JOIN filtered_districts fd ON ST_Intersects(f.geom, fd.geom);
+            """
+            geom_type = "MULTILINESTRING"
+
+        elif norm_level in ["consumer", "consumers"]:
+            sql = f"""
+            CREATE TABLE {safe_out} AS
+            WITH circle_def AS ({circle_cte}),
+            filtered_districts AS (
+                SELECT DISTINCT d.geom, m.circle_name
+                FROM circle_def m
+                JOIN india_districts d 
+                  ON UPPER(d.district_name) = m.district_name 
+                 AND UPPER(d.state_name) = 'ODISHA'
+                {target_clause}
+            )
+            SELECT 
+                v.village_name AS consumer_node_name,
+                fd.circle_name AS parent_circle,
+                '{safe_discom}' AS discom,
+                'Consumer' AS hierarchy_level,
+                v.geom
+            FROM india_villages v
+            JOIN filtered_districts fd ON ST_Intersects(v.geom, fd.geom);
+            """
+            geom_type = "POINT"
+
+        else:
+            return json.dumps({
+                "status": "error",
+                "message": f"Unknown level '{level}'. Must be one of: Circle, Division, Subdivision, Section, GSS, PSS, DSS, Feeders, Consumers, all"
+            })
+
+        spatial_engine.con.execute(sql)
+        count = spatial_engine.con.execute(f"SELECT COUNT(*) FROM {safe_out};").fetchone()[0]
+
+        catalog_manager.register_layer(
+            layer_id=safe_out,
+            name=f"{safe_discom} {norm_level.capitalize()} Hierarchy",
+            table_name=safe_out,
+            geom_type=geom_type,
+            feature_count=count,
+            description=f"Operational {norm_level} assets for {safe_discom}."
+        )
+
+        return json.dumps({
+            "status": "success",
+            "discom": safe_discom,
+            "level": norm_level.capitalize(),
+            "layer_id": safe_out,
+            "feature_count": count,
+            "target_circle": target_circle,
+            "message": f"Materialized {count} features at hierarchy level '{norm_level.capitalize()}' into layer '{safe_out}'."
+        })
+
+    except Exception as e:
+        logger.error(f"Hierarchy inspection failed: {e}", exc_info=True)
+        return json.dumps({"status": "error", "message": str(e)})
