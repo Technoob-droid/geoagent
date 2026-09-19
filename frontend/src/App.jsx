@@ -175,6 +175,114 @@ const handleClearChat = async () => {
     }
   };
 
+
+  const handleLoadHierarchy = async (tier) => {
+    try {
+      const res = await fetch(`/api/hierarchy/TPWODL?level=${tier}`);
+      const data = await res.json();
+      if (data && data.layer_id) {
+        setLayers((prev) => {
+          const exists = prev.some((l) => l.layer_id === data.layer_id);
+          if (exists) return prev;
+          return [...prev, data];
+        });
+        setOpacities((prev) => ({ ...prev, [data.layer_id]: 0.8 }));
+        setDisplayModes((prev) => ({ ...prev, [data.layer_id]: 'points' }));
+        if (data.layer_id) {
+          setZoomLayerId(data.layer_id);
+        }
+      }
+    } catch (err) {
+      console.error('Failed to load hierarchy tier:', err);
+    }
+  };
+
+  const handleRunTrace = async (substationOrDistrict) => {
+    try {
+      const queryParam = substationOrDistrict?.trim()
+        ? `district_name=${encodeURIComponent(substationOrDistrict.trim())}`
+        : 'district_name=Sambalpur';
+      const res = await fetch(`/api/hierarchy/TPWODL/trace/downstream?${queryParam}`);
+      const data = await res.json();
+      if (data && data.status === 'success' && data.topology) {
+        // Materialize downstream trace GeoJSON into a dedicated analytical layer
+        const traceGeoJson = {
+          type: 'FeatureCollection',
+          features: []
+        };
+
+        // Root PSS
+        if (data.root_substation && data.root_substation.coordinates) {
+          traceGeoJson.features.push({
+            type: 'Feature',
+            geometry: {
+              type: 'Point',
+              coordinates: data.root_substation.coordinates
+            },
+            properties: {
+              name: data.root_substation.substation_name,
+              tier: 'PSS',
+              type: 'Primary Substation'
+            }
+          });
+        }
+
+        // DSS & Consumers
+        data.topology.forEach((feeder) => {
+          if (feeder.dss_coordinates) {
+            traceGeoJson.features.push({
+              type: 'Feature',
+              geometry: {
+                type: 'Point',
+                coordinates: feeder.dss_coordinates
+              },
+              properties: {
+                name: feeder.dss_id,
+                parent_feeder: feeder.feeder_name,
+                tier: 'DSS',
+                type: 'Distribution Substation'
+              }
+            });
+          }
+          (feeder.consumers || []).forEach((c) => {
+            if (c.coordinates) {
+              traceGeoJson.features.push({
+                type: 'Feature',
+                geometry: {
+                  type: 'Point',
+                  coordinates: c.coordinates
+                },
+                properties: {
+                  name: c.village_name,
+                  distance_km: c.distance_km,
+                  tier: 'Consumers',
+                  type: 'Energized Consumer Node'
+                }
+              });
+            }
+          });
+        });
+
+        const traceLayerId = `downstream_trace_${Date.now()}`;
+        const newLayer = {
+          layer_id: traceLayerId,
+          name: `Downstream Trace: ${data.root_substation?.substation_name || 'Substation'}`,
+          geom_type: 'POINT',
+          format: 'geojson',
+          data: traceGeoJson,
+          feature_count: traceGeoJson.features.length
+        };
+
+        setLayers((prev) => [...prev, newLayer]);
+        setOpacities((prev) => ({ ...prev, [traceLayerId]: 0.9 }));
+        setDisplayModes((prev) => ({ ...prev, [traceLayerId]: 'points' }));
+        setZoomLayerId(traceLayerId);
+      }
+    } catch (err) {
+      console.error('Failed to run downstream trace:', err);
+    }
+  };
+
   return (
     <div style={{ display: 'flex', width: '100vw', height: '100vh', overflow: 'hidden', backgroundColor: '#020617' }}>
       {/* Left Chat & Execution Console */}
@@ -207,6 +315,8 @@ const handleClearChat = async () => {
           onDisplayModeChange={handleDisplayModeChange}
           onZoomToLayer={handleZoomToLayer}
           onExportLayer={handleExportLayer}
+          onLoadHierarchy={handleLoadHierarchy}
+          onRunTrace={handleRunTrace}
         />
       </div>
     </div>

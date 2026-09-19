@@ -13,7 +13,9 @@ import {
   ChevronUp,
   Flame,
   CircleDot,
-  Grid
+  Grid,
+  Zap,
+  GitBranch
 } from 'lucide-react';
 
 export default function LayerCatalog({
@@ -25,10 +27,14 @@ export default function LayerCatalog({
   onOpacityChange,
   onDisplayModeChange,
   onZoomToLayer,
-  onExportLayer
+  onExportLayer,
+  onLoadHierarchy = (tier) => console.log('Load tier:', tier),
+  onRunTrace = (pssName) => console.log('Run trace:', pssName)
 }) {
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [activeExportMenu, setActiveExportMenu] = useState(null);
+  const [showDiscomMenu, setShowDiscomMenu] = useState(false);
+  const [traceSubstation, setTraceSubstation] = useState('');
 
   const isPointLayer = (geomType) => {
     const t = geomType?.toUpperCase();
@@ -90,15 +96,68 @@ export default function LayerCatalog({
           <Layers className="w-4 h-4 text-indigo-400" />
           <span>Active Map Layers ({layers.length})</span>
         </div>
-        <button
-          type="button"
-          onClick={() => setIsCollapsed(true)}
-          className="p-1 rounded hover:bg-slate-800 text-slate-400 hover:text-slate-200 transition"
-          title="Collapse Panel"
-        >
-          <ChevronUp className="w-4 h-4" />
-        </button>
+        <div className="flex items-center space-x-1">
+          <button
+            type="button"
+            onClick={() => setShowDiscomMenu(!showDiscomMenu)}
+            className={`p-1.5 rounded transition ${showDiscomMenu ? 'bg-indigo-500/20 text-indigo-400' : 'hover:bg-slate-800 text-slate-400'}`}
+            title="DISCOM Hierarchy Explorer"
+          >
+            <Zap className="w-4 h-4" />
+          </button>
+          <button
+            type="button"
+            onClick={() => setIsCollapsed(true)}
+            className="p-1.5 rounded hover:bg-slate-800 text-slate-400 hover:text-slate-200 transition"
+            title="Collapse Panel"
+          >
+            <ChevronUp className="w-4 h-4" />
+          </button>
+        </div>
       </div>
+
+      {showDiscomMenu && (
+        <div className="p-3 bg-slate-800/50 border-b border-slate-800 text-xs text-slate-300">
+          <div className="font-semibold mb-2 text-slate-200 flex items-center justify-between">
+            <span>TPWODL 9-Tier Hierarchy</span>
+            <span className="text-[10px] text-slate-500 uppercase tracking-widest">Select Tier</span>
+          </div>
+          <div className="grid grid-cols-3 gap-1 mb-3">
+            {['Circle', 'Division', 'Subdivision', 'Section', 'GSS', 'PSS', 'DSS', 'Feeders', 'Consumers'].map(tier => (
+              <button
+                key={tier}
+                onClick={() => onLoadHierarchy(tier)}
+                className="py-1 px-2 bg-slate-800 hover:bg-indigo-600 hover:text-white rounded border border-slate-700 text-center transition-colors truncate"
+                title={`Load ${tier}`}
+              >
+                {tier}
+              </button>
+            ))}
+          </div>
+          
+          <div className="border-t border-slate-700/50 pt-2 mt-1">
+            <div className="font-semibold mb-2 text-slate-200 flex items-center space-x-1">
+              <GitBranch className="w-3.5 h-3.5 text-amber-400" />
+              <span>Downstream Network Trace</span>
+            </div>
+            <div className="flex space-x-2">
+              <input 
+                type="text" 
+                placeholder="PSS Name / District..."
+                value={traceSubstation}
+                onChange={(e) => setTraceSubstation(e.target.value)}
+                className="flex-1 bg-slate-900 border border-slate-700 rounded px-2 py-1 focus:outline-none focus:border-indigo-500"
+              />
+              <button 
+                onClick={() => onRunTrace(traceSubstation)}
+                className="bg-indigo-600 hover:bg-indigo-500 text-white px-3 py-1 rounded transition-colors font-medium whitespace-nowrap"
+              >
+                Trace
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Layer List */}
       <div className="flex-1 overflow-y-auto p-2 space-y-2">

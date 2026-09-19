@@ -3,6 +3,7 @@ import maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import { Ruler, Pentagon, MapPin, X, Search, Loader2, BarChart3 } from 'lucide-react';
 import { COLOR_PALETTES, buildInterpolateColor } from '../utils/colorRamps';
+import { DISCOM_HIERARCHY_CONFIG } from '../config/hierarchyConfig';
 
 const CURRENT_LOCATION = [88.3639, 22.5726]; // Kolkata coordinates [lng, lat]
 
