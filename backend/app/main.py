@@ -5,6 +5,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from backend.app.config import settings
 from backend.app.api.routes_layers import router as layers_router
+from backend.app.api.routes_hierarchy import router as hierarchy_router
+
 from backend.app.api.routes_chat import router as chat_router
 from backend.app.api.routes_export import router as export_router
 
@@ -37,6 +39,8 @@ app.add_middleware(
 
 # Mount endpoints
 app.include_router(layers_router)
+app.include_router(hierarchy_router)
+
 app.include_router(chat_router)
 app.include_router(export_router)
 
