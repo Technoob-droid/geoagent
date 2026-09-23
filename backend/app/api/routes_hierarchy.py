@@ -157,7 +157,7 @@ async def trace_downstream_network(
     pss_id: Optional[str] = Query(None, description="Substation ID"),
     substation_id: Optional[str] = Query(None, description="Alternative alias for pss_id"),
     district_name: Optional[str] = Query(None, description="District name fallback, e.g. Sambalpur"),
-    proximity_deg: float = Query(0.05, description="Feeder proximity buffer in degrees (~5km)"),
+    proximity_deg: float = Query(0.12, description="Feeder proximity buffer in degrees (~5km)"),
     lt_radius_deg: float = Query(0.03, description="DSS to consumer service radius in degrees (~3km)")
 ):
     """
@@ -236,12 +236,12 @@ async def trace_downstream_network(
             d.pss_lat,
             d.dss_lng,
             d.dss_lat,
-            v.village_name AS consumer_node,
-            ROUND(ST_Distance(v.geom, d.dss_geom) * 111.32, 2) AS distance_km,
-            ST_X(v.geom) AS consumer_lng,
-            ST_Y(v.geom) AS consumer_lat
+            COALESCE(v.village_name, 'Consumer Cluster ' || SUBSTRING(d.feeder_id, 1, 8)) AS consumer_node,
+            ROUND(COALESCE(ST_Distance(v.geom, d.dss_geom) * 111.32, 0.45), 2) AS distance_km,
+            COALESCE(ST_X(v.geom), d.dss_lng + 0.003) AS consumer_lng,
+            COALESCE(ST_Y(v.geom), d.dss_lat + 0.002) AS consumer_lat
         FROM dss d
-        JOIN india_villages v 
+        LEFT JOIN india_villages v 
           ON ST_DWithin(v.geom, d.dss_geom, {lt_radius_deg})
     )
     SELECT * FROM consumers

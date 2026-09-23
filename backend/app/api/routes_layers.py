@@ -27,9 +27,12 @@ VILLAGES_PARQUET = f"{BOUNDARIES_DIR}/villages/india_villages.parquet"
 
 
 @router.get("")
-async def get_all_layers():
-    """Returns metadata for all available layers in the spatial catalog."""
-    return catalog_manager.list_layers()
+async def get_all_layers(base_only: bool = False):
+    """Returns metadata for available layers in the spatial catalog."""
+    all_layers = catalog_manager.list_layers()
+    if base_only:
+        return [l for l in all_layers if l.get("is_system", False)]
+    return all_layers
 
 @router.get("/tiles/{layer_id}/{z}/{x}/{y}.pbf")
 async def get_vector_tile(layer_id: str, z: int, x: int, y: int):

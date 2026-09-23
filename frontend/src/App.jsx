@@ -6,6 +6,7 @@ import LayerCatalog from './components/LayerCatalog';
 export default function App() {
   const [layers, setLayers] = useState([]);
   const [selectedDiscom, setSelectedDiscom] = useState('TPWODL');
+  const [traceSummary, setTraceSummary] = useState(null);
   const [hiddenLayers, setHiddenLayers] = useState(new Set());
   const [opacities, setOpacities] = useState({});
   const [displayModes, setDisplayModes] = useState({}); // { [layerId]: 'points' | 'clusters' | 'heatmap' }
@@ -13,7 +14,7 @@ export default function App() {
   const [viewportBbox, setViewportBbox] = useState(null);
 
   useEffect(() => {
-    fetch('/api/layers')
+    fetch('/api/layers?base_only=true')
       .then((res) => res.json())
       .then((data) => {
         if (Array.isArray(data)) {
@@ -232,8 +233,8 @@ const handleClearChat = async () => {
       if (match) {
         target = match[1]; // Extracts "PSS_150791254"
       }
-      const queryParam = `substation_id=${encodeURIComponent(target)}&district_name=Sambalpur`;
-      const res = await fetch(`/api/hierarchy/TPWODL/trace/downstream?${queryParam}`);
+      const queryParam = `substation_id=${encodeURIComponent(target)}`;
+      const res = await fetch(`/api/hierarchy/${selectedDiscom}/trace/downstream?${queryParam}`);
       const data = await res.json();
       if (data && data.status === 'success' && data.topology) {
         // Materialize downstream trace GeoJSON into a dedicated analytical layer
@@ -258,9 +259,29 @@ const handleClearChat = async () => {
           });
         }
 
-        // DSS & Consumers
+        // DSS, Feeders (LineStrings), and Consumers (LineStrings + Points)
+        const pssCoords = data.root_substation?.coordinates;
+
         data.topology.forEach((feeder) => {
           if (feeder.dss_coordinates) {
+            // Feeder Trunk Line: PSS -> DSS
+            if (pssCoords) {
+              traceGeoJson.features.push({
+                type: 'Feature',
+                geometry: {
+                  type: 'LineString',
+                  coordinates: [pssCoords, feeder.dss_coordinates]
+                },
+                properties: {
+                  name: feeder.feeder_name || '11kV Feeder Line',
+                  tier: 'Feeder',
+                  type: '11kV Feeder Trunk',
+                  voltage_kv: 11
+                }
+              });
+            }
+
+            // DSS Point
             traceGeoJson.features.push({
               type: 'Feature',
               geometry: {
@@ -275,8 +296,27 @@ const handleClearChat = async () => {
               }
             });
           }
+
           (feeder.consumers || []).forEach((c) => {
             if (c.coordinates) {
+              // Service Drop Line: DSS -> Consumer Settlement
+              if (feeder.dss_coordinates) {
+                traceGeoJson.features.push({
+                  type: 'Feature',
+                  geometry: {
+                    type: 'LineString',
+                    coordinates: [feeder.dss_coordinates, c.coordinates]
+                  },
+                  properties: {
+                    name: `Service Drop: ${c.village_name}`,
+                    tier: 'Drop',
+                    type: 'LT Service Line',
+                    voltage_kv: 0.415
+                  }
+                });
+              }
+
+              // Consumer Node Point
               traceGeoJson.features.push({
                 type: 'Feature',
                 geometry: {
@@ -294,23 +334,44 @@ const handleClearChat = async () => {
           });
         });
 
-        const traceLayerId = data.layer_id || `trace_tpwodl_${Date.now()}`;
+        const traceLayerId = data.layer_id || `trace_${selectedDiscom.toLowerCase()}_${Date.now()}`;
         const newLayer = {
           layer_id: traceLayerId,
           name: `Trace: ${data.root_substation?.substation_name || 'Substation'}`,
-          geom_type: 'POINT',
+          geom_type: 'GEOMETRYCOLLECTION',
           format: 'geojson',
           data: `/api/layers/${traceLayerId}/geojson`,
-          feature_count: data.consumer_count ? (data.consumer_count + (data.feeder_count || 0) + 1) : traceGeoJson.features.length
+          feature_count: traceGeoJson.features.length
         };
 
         setLayers((prev) => {
-          // Clear any prior trace layers to avoid stale 404 requests
           const filtered = prev.filter(l => !l.layer_id.startsWith('downstream_trace_') && !l.layer_id.startsWith('trace_'));
           return [...filtered, newLayer];
         });
         setOpacities((prev) => ({ ...prev, [traceLayerId]: 1.0 }));
-        setDisplayModes((prev) => ({ ...prev, [traceLayerId]: 'points' }));
+        setDisplayModes((prev) => ({ ...prev, [traceLayerId]: 'all' }));
+        setTraceSummary({
+          discom: data.discom || selectedDiscom,
+          rootSubstation: data.root_substation?.substation_name,
+          rootId: data.root_substation?.substation_id,
+          feederCount: data.feeder_count || data.topology.length,
+          consumerCount: data.consumer_count || 0,
+          layerId: traceLayerId
+        });
+
+        // Add a trace report message to the chat console
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: 'assistant',
+            content: `⚡ **Downstream Trace Completed**\n\n` +
+              `• **DISCOM**: ${data.discom || selectedDiscom}\n` +
+              `• **Root Substation**: ${data.root_substation?.substation_name} (${data.root_substation?.substation_id})\n` +
+              `• **Outgoing Feeders**: ${data.feeder_count || data.topology.length}\n` +
+              `• **Connected Consumer Settlements**: ${data.consumer_count || 0}\n` +
+              `• **Trace Layer**: \`${traceLayerId}\` (High-voltage & Low-voltage spans materialized on map)`
+          }
+        ]);
         setZoomLayerId(traceLayerId);
       }
     } catch (err) {
@@ -332,7 +393,69 @@ const handleClearChat = async () => {
 
       {/* Right Map Canvas Container */}
       <div style={{ flex: 1, height: '100%', position: 'relative', overflow: 'hidden' }}>
-        <MapViewer 
+              {/* Downstream Trace Summary HUD Card */}
+      {traceSummary && (
+        <div style={{
+          position: 'absolute',
+          top: '72px',
+          left: '380px',
+          zIndex: 100,
+          background: 'rgba(15, 23, 42, 0.90)',
+          backdropFilter: 'blur(12px)',
+          border: '1px solid rgba(56, 189, 248, 0.35)',
+          borderRadius: '12px',
+          padding: '16px 20px',
+          color: '#f8fafc',
+          boxShadow: '0 8px 32px rgba(0, 0, 0, 0.45)',
+          minWidth: '320px',
+          maxWidth: '400px'
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <span style={{ fontSize: '18px' }}>⚡</span>
+              <span style={{ fontWeight: 700, fontSize: '14px', letterSpacing: '0.05em', color: '#38bdf8', textTransform: 'uppercase' }}>
+                Trace: {traceSummary.discom}
+              </span>
+            </div>
+            <button 
+              onClick={() => setTraceSummary(null)}
+              style={{
+                background: 'transparent',
+                border: 'none',
+                color: '#94a3b8',
+                cursor: 'pointer',
+                fontSize: '16px',
+                lineHeight: 1
+              }}
+            >×</button>
+          </div>
+
+          <div style={{ fontSize: '13px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', borderBottom: '1px solid rgba(255,255,255,0.08)', paddingBottom: '6px' }}>
+              <span style={{ color: '#94a3b8' }}>Root PSS</span>
+              <span style={{ fontWeight: 600, color: '#f59e0b' }}>{traceSummary.rootSubstation}</span>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', borderBottom: '1px solid rgba(255,255,255,0.08)', paddingBottom: '6px' }}>
+              <span style={{ color: '#94a3b8' }}>Substation ID</span>
+              <span style={{ fontFamily: 'monospace', color: '#cbd5e1' }}>{traceSummary.rootId}</span>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', borderBottom: '1px solid rgba(255,255,255,0.08)', paddingBottom: '6px' }}>
+              <span style={{ color: '#94a3b8' }}>Outgoing Feeders</span>
+              <span style={{ fontWeight: 600, color: '#06b6d4' }}>{traceSummary.feederCount}</span>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', borderBottom: '1px solid rgba(255,255,255,0.08)', paddingBottom: '6px' }}>
+              <span style={{ color: '#94a3b8' }}>Consumer Settlements</span>
+              <span style={{ fontWeight: 600, color: '#10b981' }}>{traceSummary.consumerCount}</span>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', paddingTop: '2px' }}>
+              <span style={{ color: '#94a3b8' }}>Active Layer</span>
+              <span style={{ fontFamily: 'monospace', fontSize: '11px', color: '#94a3b8' }}>{traceSummary.layerId}</span>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <MapViewer 
           layers={layers} 
           hiddenLayers={hiddenLayers} 
           opacities={opacities}

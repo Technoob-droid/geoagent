@@ -9,6 +9,9 @@ const CURRENT_LOCATION = [88.3639, 22.5726]; // Kolkata coordinates [lng, lat]
 
 // Layers served via DuckDB vector tiles rather than GeoJSON payloads
 const VECTOR_TILE_LAYERS = new Set([
+  'india_states',
+  'india_districts',
+  'india_subdistricts',
   'india_villages',
   'india_cities',
   'villages',
@@ -193,7 +196,7 @@ export default function MapViewer({
       if (src) {
         src.setData(geojson);
       }
-    } catch (err) {
+                } catch (err) {
       console.error('Failed to stream administrative boundaries:', err);
     }
   };
@@ -497,10 +500,7 @@ export default function MapViewer({
       }
 
       const props = topFeature.properties || {};
-      const layerBaseName = clickedLayerId.replace(
-        /-point-circle|-unclustered-points|-vector-points|-polygon-fill|-line|-cluster-circles/g,
-        ''
-      );
+      const layerBaseName = clickedLayerId.replace(/-point-circle|-unclustered-points|-vector-points|-vector-fill|-vector-stroke|-vector-line|-polygon-fill|-line|-cluster-circles/g, '');
 
       const rows = Object.entries(props)
         .filter(([k]) => !['cluster', 'cluster_id', 'point_count', 'point_count_abbreviated'].includes(k))
@@ -545,12 +545,15 @@ export default function MapViewer({
       const activeIds = [];
       loadedLayersRef.current.forEach((_, layerId) => {
         [
-          `${layerId}-vector-points`,
-          `${layerId}-point-circle`,
-          `${layerId}-unclustered-points`,
-          `${layerId}-polygon-fill`,
-          `${layerId}-line`
-        ].forEach((subId) => {
+            `${layerId}-vector-points`,
+            `${layerId}-vector-fill`,
+            `${layerId}-vector-stroke`,
+            `${layerId}-vector-line`,
+            `${layerId}-point-circle`,
+            `${layerId}-unclustered-points`,
+            `${layerId}-polygon-fill`,
+            `${layerId}-line`
+          ].forEach((subId) => {
           if (map.getLayer(subId)) activeIds.push(subId);
         });
       });
@@ -572,25 +575,28 @@ export default function MapViewer({
 
       const top = features[0];
       const props = top.properties || {};
-      const layerId = top.layer.id.replace(
-        /-point-circle|-unclustered-points|-vector-points|-polygon-fill|-line/g,
-        ''
-      );
+      const layerId = top.layer.id.replace(/-point-circle|-unclustered-points|-vector-points|-vector-fill|-vector-stroke|-vector-line|-polygon-fill|-line/g, '');
 
       const primaryName =
         props.village_name ||
-        props.name ||
-        props.NAME ||
         props.city_name ||
+        props.subdistrict_name ||
         props.district_name ||
         props.state_name ||
+        props.name ||
+        props.NAME ||
+        props.Name ||
         'Feature';
 
       const secondaryDetail =
+        props.population ? `Population: ${Number(props.population).toLocaleString()}` :
+        (props.district_name && props.state_name && primaryName !== props.state_name) ? `State: ${props.state_name}` :
+        (props.parent_iso) ? `Parent: ${props.parent_iso}` :
+        (props.state_iso) ? `ISO: ${props.state_iso}` :
         props.state_code ? `State Code: ${props.state_code}` :
+        props.voltage_kv ? `${props.voltage_kv} kV` :
         props.type ? `Type: ${props.type}` :
         props.feature_code ? `Code: ${props.feature_code}` : '';
-
       const tooltipContent = `
         <div style="font-family: ui-sans-serif, system-ui, sans-serif; font-size: 11px; padding: 2px 4px; pointer-events: none;">
           <div style="font-weight: 700; color: #38bdf8; text-transform: uppercase; font-size: 9px; letter-spacing: 0.05em;">
@@ -657,6 +663,9 @@ export default function MapViewer({
             `${id}-collection-points`,
             `${id}-point-circle`, `${id}-point-icon`,
             `${id}-vector-points`,
+            `${id}-vector-fill`,
+            `${id}-vector-stroke`,
+            `${id}-vector-line`,
             `${id}-cluster-circles`,
             `${id}-cluster-counts`,
             `${id}-unclustered-points`,
@@ -697,7 +706,7 @@ export default function MapViewer({
                   });
                 }
 
-              const isLineLayer = geomType === 'LINESTRING' || geomType === 'MULTILINESTRING' || layerId.includes('feeder');
+              const isLineLayer = geomType === 'LINESTRING' || geomType === 'MULTILINESTRING' || geomType === 'GEOMETRYCOLLECTION' || layerId.includes('feeder') || layerId.includes('trace_');
               const isVillageLayer = layerId.toLowerCase().includes('village');
 
               if (isLineLayer) {
@@ -708,7 +717,7 @@ export default function MapViewer({
                     type: 'line',
                     source: layerId,
                     'source-layer': layerId,
-                    minzoom: 1,
+                    minzoom: 0,
                     layout: {
                       visibility: isHidden ? 'none' : 'visible',
                       'line-join': 'round',
@@ -733,6 +742,55 @@ export default function MapViewer({
                         765, '#ec4899'    // 765 kV+ (Pink)
                       ],
                       'line-opacity': alpha
+                    }
+                  });
+                }
+              } else if (geomType === 'POLYGON' || geomType === 'MULTIPOLYGON' || ['india_states', 'india_districts', 'india_subdistricts'].includes(layerId)) {
+                // Remove any legacy point layer that was inadvertently added
+                const stalePointId = `${layerId}-vector-points`;
+                if (map.getLayer(stalePointId)) {
+                  map.removeLayer(stalePointId);
+                }
+
+                const vectorFillId = `${layerId}-vector-fill`;
+                const vectorStrokeId = `${layerId}-vector-stroke`;
+
+                if (!map.getLayer(vectorFillId)) {
+                  map.addLayer({
+                    id: vectorFillId,
+                    type: 'fill',
+                    source: layerId,
+                    'source-layer': layerId,
+                    minzoom: 0,
+                    layout: { visibility: isHidden ? 'none' : 'visible' },
+                    paint: {
+                      'fill-color': color.fill,
+                      'fill-opacity': isHidden ? 0 : Math.min(alpha * 0.04, 0.08)
+                    }
+                  });
+                }
+
+                if (!map.getLayer(vectorStrokeId)) {
+                  map.addLayer({
+                    id: vectorStrokeId,
+                    type: 'line',
+                    source: layerId,
+                    'source-layer': layerId,
+                    minzoom: 0,
+                    layout: {
+                      visibility: isHidden ? 'none' : 'visible',
+                      'line-join': 'round',
+                      'line-cap': 'round'
+                    },
+                    paint: {
+                      'line-color': color.stroke,
+                      'line-width': [
+                        'interpolate', ['linear'], ['zoom'],
+                        2, 0.8,
+                        6, 1.4,
+                        10, 2.2
+                      ],
+                      'line-opacity': isHidden ? 0 : alpha
                     }
                   });
                 }
@@ -997,21 +1055,31 @@ export default function MapViewer({
                     }
                   });
                 }
-              } else if (activeGeom === 'GEOMETRYCOLLECTION' || activeGeom === 'GEOMETRY') {
-                if (!map.getLayer(`${layerId}-collection-lines`)) {
+              } else if (activeGeom === 'GEOMETRYCOLLECTION' || activeGeom === 'GEOMETRY' || layerId.includes('trace_')) {
+                // 1. Line conductor / trunk network
+                const lineLayerId = `${layerId}-collection-lines`;
+                if (!map.getLayer(lineLayerId)) {
                   map.addLayer({
-                    id: `${layerId}-collection-lines`,
+                    id: lineLayerId,
                     type: 'line',
                     source: layerId,
-                    filter: ['==', '$type', 'LineString'],
-                    layout: { visibility: isHidden ? 'none' : 'visible' },
+                    filter: ['any', 
+                      ['==', ['geometry-type'], 'LineString'], 
+                      ['==', ['geometry-type'], 'MultiLineString'],
+                      ['==', '$type', 'LineString']
+                    ],
+                    layout: { 
+                      visibility: isHidden ? 'none' : 'visible',
+                      'line-join': 'round',
+                      'line-cap': 'round'
+                    },
                     paint: {
                       'line-color': [
                         'match',
                         ['coalesce', ['get', 'tier'], ''],
                         'Incoming Feeder', '#f59e0b',
-                        'Outgoing Feeder', '#06b6d4',
-                        'Conductor Span', '#94a3b8',
+                        'Outgoing Feeder', '#38bdf8',
+                        'Conductor Span', '#a855f7',
                         'Connector Drop', '#10b981',
                         '#38bdf8'
                       ],
@@ -1020,161 +1088,52 @@ export default function MapViewer({
                         ['coalesce', ['get', 'tier'], ''],
                         'Incoming Feeder', 4.0,
                         'Outgoing Feeder', 3.0,
-                        'Conductor Span', 2.0,
-                        'Connector Drop', 1.5,
+                        'Conductor Span', 2.5,
+                        'Connector Drop', 1.8,
                         2.5
                       ],
-                      'line-dasharray': [
-                        'match',
-                        ['coalesce', ['get', 'tier'], ''],
-                        'Connector Drop', ['literal', [2, 2]],
-                        ['literal', [1]]
-                      ],
-                      'line-opacity': alpha
+                      'line-opacity': 0.95
                     }
                   });
                 }
 
-                if (!map.getLayer(`${layerId}-collection-points`)) {
+                // 2. Substation / DSS / Consumer Nodes
+                const pointLayerId = `${layerId}-collection-points`;
+                if (!map.getLayer(pointLayerId)) {
                   map.addLayer({
-                    id: `${layerId}-collection-points`,
+                    id: pointLayerId,
                     type: 'circle',
                     source: layerId,
-                    filter: ['==', '$type', 'Point'],
+                    filter: ['any', 
+                      ['==', ['geometry-type'], 'Point'], 
+                      ['==', ['geometry-type'], 'MultiPoint'],
+                      ['==', '$type', 'Point']
+                    ],
                     layout: { visibility: isHidden ? 'none' : 'visible' },
                     paint: {
-                      'circle-radius': [
-                        'match',
-                        ['coalesce', ['get', 'tier'], ''],
-                        'PSS', 8,
-                        'DSS', 6,
-                        'Pole', 3.5,
-                        'Consumer', 4,
-                        5
-                      ],
                       'circle-color': [
                         'match',
                         ['coalesce', ['get', 'tier'], ''],
+                        'GSS', '#e11d48',
                         'PSS', '#f59e0b',
                         'DSS', '#10b981',
-                        'Pole', '#64748b',
                         'Consumer', '#0ea5e9',
-                        '#f59e0b'
+                        '#38bdf8'
+                      ],
+                      'circle-radius': [
+                        'match',
+                        ['coalesce', ['get', 'tier'], ''],
+                        'GSS', 9,
+                        'PSS', 7.5,
+                        'DSS', 5.5,
+                        'Consumer', 4.0,
+                        6
                       ],
                       'circle-stroke-width': 1.5,
                       'circle-stroke-color': '#ffffff',
-                      'circle-opacity': alpha
+                      'circle-opacity': 0.95
                     }
                   });
-                }
-              } else {
-                const domain = extractChoroplethDomain(data);
-                const isChoropleth = domain && domain.min !== domain.max;
-
-                const fillColorExpr = isChoropleth
-                  ? buildInterpolateColor(domain.property, domain.min, domain.max, COLOR_PALETTES.viridis)
-                  : color.fill;
-
-                if (isChoropleth && !isHidden) {
-                  detectedLegend = {
-                    layerName: layer.name || layerId,
-                    property: domain.property,
-                    min: domain.min,
-                    max: domain.max,
-                    palette: COLOR_PALETTES.viridis
-                  };
-                }
-
-                if (!map.getLayer(`${layerId}-polygon-fill`)) {
-                  map.addLayer({
-                    id: `${layerId}-polygon-fill`,
-                    type: 'fill',
-                    source: layerId,
-                    layout: { visibility: isHidden ? 'none' : 'visible' },
-                    paint: {
-                      'fill-color': fillColorExpr,
-                      'fill-opacity': alpha * 0.7
-                    }
-                  });
-                }
-
-                if (!map.getLayer(`${layerId}-polygon-stroke`)) {
-                  map.addLayer({
-                    id: `${layerId}-polygon-stroke`,
-                    type: 'line',
-                    source: layerId,
-                    layout: { visibility: isHidden ? 'none' : 'visible' },
-                    paint: {
-                      'line-color': isChoropleth ? '#ffffff' : color.stroke,
-                      'line-width': isChoropleth ? 1.5 : 2,
-                      'line-opacity': alpha
-                    }
-                  });
-
-                if (!map.getLayer(`${layerId}-polygon-labels`)) {
-                  map.addLayer({
-                    id: `${layerId}-polygon-labels`,
-                    type: 'symbol',
-                    source: layerId,
-                    layout: {
-                      'text-field': [
-                        'coalesce',
-                        ['get', 'circle_name'],
-                        ['get', 'division_name'],
-                        ['get', 'subdivision_name'],
-                        ['get', 'section_name'],
-                        ['get', 'discom_name'],
-                        ['get', 'district_name'],
-                        ['get', 'feeder_name'],
-                        ['get', 'name'],
-                        ''
-                      ],
-                      'text-font': ['Open Sans Bold', 'Arial Unicode MS Bold'],
-                      'text-size': [
-                        'interpolate', ['linear'], ['zoom'],
-                        6, 12,
-                        9, 15,
-                        13, 18
-                      ],
-                      'text-anchor': 'center',
-                      'text-allow-overlap': false,
-                      'text-ignore-placement': false,
-                      visibility: isHidden ? 'none' : 'visible'
-                    },
-                    paint: {
-                      'text-color': '#ffffff',
-                      'text-halo-color': '#020617',
-                      'text-halo-width': 2.5,
-                      'text-halo-blur': 1.2
-                    }
-                  });
-                }
-                }
-              }
-
-              loadedLayersRef.current.set(layerId, { isVector: false, geojson: data, geomType, color });
-
-              const isBaseAdmin = [
-                'india_states',
-                'india_districts',
-                'india_subdistricts',
-                'india_cities',
-                'india_villages'
-              ].includes(layerId);
-
-              const bbox = computeBBox(data);
-              if (bbox) {
-                if (!isBaseAdmin) {
-                  map.fitBounds(
-                    [[bbox[0], bbox[1]], [bbox[2], bbox[3]]],
-                    { padding: 80, maxZoom: 13, duration: 1200 }
-                  );
-                } else if (!initialZoomDoneRef.current) {
-                  map.fitBounds(
-                    [[bbox[0], bbox[1]], [bbox[2], bbox[3]]],
-                    { padding: 80, maxZoom: 14, duration: 1000 }
-                  );
-                  initialZoomDoneRef.current = true;
                 }
               }
             }
@@ -1221,6 +1180,9 @@ export default function MapViewer({
       if (useVectorTiles) {
         const vectorPointId = `${layerId}-vector-points`;
         const vectorLineId = `${layerId}-vector-line`;
+        const vectorFillId = `${layerId}-vector-fill`;
+        const vectorStrokeId = `${layerId}-vector-stroke`;
+
         if (map.getLayer(vectorPointId)) {
           map.setLayoutProperty(vectorPointId, 'visibility', isHidden ? 'none' : 'visible');
           if (!isHidden) {
@@ -1233,7 +1195,19 @@ export default function MapViewer({
             map.setPaintProperty(vectorLineId, 'line-opacity', alpha);
           }
         }
-      } else if (isPoint) {
+        if (map.getLayer(vectorFillId)) {
+          map.setLayoutProperty(vectorFillId, 'visibility', isHidden ? 'none' : 'visible');
+          if (!isHidden) {
+            map.setPaintProperty(vectorFillId, 'fill-opacity', Math.min(alpha * 0.04, 0.08));
+          }
+        }
+        if (map.getLayer(vectorStrokeId)) {
+          map.setLayoutProperty(vectorStrokeId, 'visibility', isHidden ? 'none' : 'visible');
+          if (!isHidden) {
+            map.setPaintProperty(vectorStrokeId, 'line-opacity', alpha);
+          }
+        }
+            } else if (isPoint) {
         const showPoints = !isHidden && mode === 'points';
         const showClusters = !isHidden && mode === 'clusters';
         const showHeatmap = !isHidden && mode === 'heatmap';

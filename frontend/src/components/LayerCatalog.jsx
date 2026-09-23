@@ -443,8 +443,18 @@ export default function LayerCatalog({
             onRunTrace(filter.pss);
           } else if (filter.gss) {
             onRunTrace(filter.gss);
+          } else if (filter.mv_feeder || filter.hv_feeder || filter.lv_feeder) {
+            onLoadHierarchy('Feeders');
+          } else if (filter.section) {
+            onLoadHierarchy('Section');
+          } else if (filter.subdivision) {
+            onLoadHierarchy('Subdivision');
+          } else if (filter.division) {
+            onLoadHierarchy('Division');
           } else if (filter.circle) {
             onLoadHierarchy('Circle');
+          } else {
+            onLoadHierarchy('all');
           }
         }}
       />
