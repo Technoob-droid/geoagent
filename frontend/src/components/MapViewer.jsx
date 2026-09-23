@@ -464,6 +464,7 @@ export default function MapViewer({
           `${layerId}-unclustered-points`,
           `${layerId}-vector-points`,
           `${layerId}-polygon-fill`,
+            `${layerId}-polygon-stroke`,
           `${layerId}-line`
         ].forEach((subId) => {
           if (map.getLayer(subId)) allInteractiveLayers.push(subId);
@@ -552,6 +553,7 @@ export default function MapViewer({
             `${layerId}-point-circle`,
             `${layerId}-unclustered-points`,
             `${layerId}-polygon-fill`,
+            `${layerId}-polygon-stroke`,
             `${layerId}-line`
           ].forEach((subId) => {
           if (map.getLayer(subId)) activeIds.push(subId);
@@ -1055,6 +1057,48 @@ export default function MapViewer({
                     }
                   });
                 }
+              } else if (activeGeom === 'POLYGON' || activeGeom === 'MULTIPOLYGON') {
+                const polyFillId = `${layerId}-polygon-fill`;
+                const polyStrokeId = `${layerId}-polygon-stroke`;
+
+                if (!map.getLayer(polyFillId)) {
+                  map.addLayer({
+                    id: polyFillId,
+                    type: 'fill',
+                    source: layerId,
+                    layout: { visibility: isHidden ? 'none' : 'visible' },
+                    paint: {
+                      'fill-color': [
+                        'coalesce',
+                        ['get', 'fill_color'],
+                        color.fill
+                      ],
+                      'fill-opacity': isHidden ? 0 : Math.min(alpha * 0.18, 0.3)
+                    }
+                  });
+                }
+
+                if (!map.getLayer(polyStrokeId)) {
+                  map.addLayer({
+                    id: polyStrokeId,
+                    type: 'line',
+                    source: layerId,
+                    layout: {
+                      visibility: isHidden ? 'none' : 'visible',
+                      'line-join': 'round',
+                      'line-cap': 'round'
+                    },
+                    paint: {
+                      'line-color': [
+                        'coalesce',
+                        ['get', 'border_color'],
+                        color.stroke
+                      ],
+                      'line-width': 2.2,
+                      'line-opacity': isHidden ? 0 : alpha
+                    }
+                  });
+                }
               } else if (activeGeom === 'GEOMETRYCOLLECTION' || activeGeom === 'GEOMETRY' || layerId.includes('trace_')) {
                 // 1. Line conductor / trunk network
                 const lineLayerId = `${layerId}-collection-lines`;
@@ -1237,8 +1281,10 @@ export default function MapViewer({
       } else {
         const visibility = isHidden ? 'none' : 'visible';
         if (map.getLayer(`${layerId}-polygon-fill`)) {
-          map.setLayoutProperty(`${layerId}-polygon-fill`, 'visibility', visibility);
-          if (!isHidden) map.setPaintProperty(`${layerId}-polygon-fill`, 'fill-opacity', alpha * 0.7);
+          map.setLayoutProperty(`${layerId}-polygon-fill`,
+            `${layerId}-polygon-stroke`, 'visibility', visibility);
+          if (!isHidden) map.setPaintProperty(`${layerId}-polygon-fill`,
+            `${layerId}-polygon-stroke`, 'fill-opacity', alpha * 0.7);
         }
         if (map.getLayer(`${layerId}-polygon-stroke`)) {
           map.setLayoutProperty(`${layerId}-polygon-stroke`, 'visibility', visibility);
