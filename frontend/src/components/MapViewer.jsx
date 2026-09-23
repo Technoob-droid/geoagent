@@ -1078,6 +1078,40 @@ export default function MapViewer({
                   });
                 }
 
+                  const polyLabelId = `${layerId}-polygon-labels`;
+                  if (!map.getLayer(polyLabelId)) {
+                    map.addLayer({
+                      id: polyLabelId,
+                      type: 'symbol',
+                      source: layerId,
+                      layout: {
+                        visibility: isHidden ? 'none' : 'visible',
+                        'symbol-placement': 'point',
+                        'text-field': [
+                          'coalesce',
+                          ['get', 'circle_name'],
+                          ['get', 'division_name'],
+                          ['get', 'subdivision_name'],
+                          ['get', 'discom_name'],
+                          ['get', 'name'],
+                          ''
+                        ],
+                        'text-size': 12,
+                        'text-anchor': 'center',
+                        'text-justify': 'center',
+                        'text-allow-overlap': true,
+                        'text-ignore-placement': true
+                      },
+                      paint: {
+                        'text-color': '#f8fafc',
+                        'text-halo-color': '#020617',
+                        'text-halo-width': 2.5,
+                        'text-halo-blur': 1,
+                        'text-opacity': isHidden ? 0 : 0.95
+                      }
+                    });
+                  }
+
                 if (!map.getLayer(polyStrokeId)) {
                   map.addLayer({
                     id: polyStrokeId,

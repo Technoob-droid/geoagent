@@ -178,20 +178,33 @@ const handleClearChat = async () => {
   };
 
 
-    const handleClearHierarchy = () => {
+  const handleClearHierarchy = () => {
     const isHierarchyOrTrace = (id) => {
-      const lower = (id || '').toLowerCase();
+      if (!id) return false;
+      const lower = String(id).toLowerCase();
       return (
-        lower.startsWith('tpwodl_') ||
-        lower.startsWith('tpnodl_') ||
-        lower.startsWith('tpsodl_') ||
-        lower.startsWith('tpcedl_') ||
+        lower.startsWith('tpwodl') ||
+        lower.startsWith('tpnodl') ||
+        lower.startsWith('tpsodl') ||
+        lower.startsWith('tpcedl') ||
         lower.startsWith('trace_') ||
         lower.startsWith('downstream_') ||
         lower.startsWith('trace:') ||
-        (selectedDiscom && lower.startsWith(selectedDiscom.toLowerCase() + '_'))
+        (selectedDiscom && lower.startsWith(selectedDiscom.toLowerCase()))
       );
     };
+
+    setLayers((prev) => prev.filter((l) => !isHierarchyOrTrace(l.layer_id)));
+    setHiddenLayers((prev) => {
+      const next = new Set(prev);
+      for (const id of next) {
+        if (isHierarchyOrTrace(id)) {
+          next.delete(id);
+        }
+      }
+      return next;
+    });
+  };
 
     // 1. Remove from layers
     setLayers((prev) => prev.filter((l) => !isHierarchyOrTrace(l.layer_id)));
