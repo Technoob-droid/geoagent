@@ -1215,7 +1215,7 @@ export default function MapViewer({
                 }
               }
             }
-                loadedLayersRef.current.set(layerId, { isVector: false, geomType: activeGeom, color, geojson: data });
+                loadedLayersRef.current.set(layerId, { isVector: false, geomType: (typeof activeGeom !== 'undefined' ? activeGeom : (geomType || 'POLYGON')), color, geojson: (typeof data !== 'undefined' ? data : null) });
           } catch (err) {
             console.error(`Failed to load layer ${layerId}:`, err);
           }
@@ -1315,16 +1315,18 @@ export default function MapViewer({
         }
       } else {
         const visibility = isHidden ? 'none' : 'visible';
-        if (map.getLayer(`${layerId}-polygon-fill`)) {
-          map.setLayoutProperty(`${layerId}-polygon-fill`,
-            `${layerId}-polygon-stroke`, 'visibility', visibility);
-          if (!isHidden) map.setPaintProperty(`${layerId}-polygon-fill`,
-            `${layerId}-polygon-stroke`, 'fill-opacity', alpha * 0.7);
-        }
-        if (map.getLayer(`${layerId}-polygon-stroke`)) {
-          map.setLayoutProperty(`${layerId}-polygon-stroke`, 'visibility', visibility);
-          if (!isHidden) map.setPaintProperty(`${layerId}-polygon-stroke`, 'line-opacity', alpha);
-        }
+          if (map.getLayer(`${layerId}-polygon-fill`)) {
+            map.setLayoutProperty(`${layerId}-polygon-fill`, 'visibility', visibility);
+            if (!isHidden) map.setPaintProperty(`${layerId}-polygon-fill`, 'fill-opacity', Math.min(alpha * 0.18, 0.3));
+          }
+          if (map.getLayer(`${layerId}-polygon-stroke`)) {
+            map.setLayoutProperty(`${layerId}-polygon-stroke`, 'visibility', visibility);
+            if (!isHidden) map.setPaintProperty(`${layerId}-polygon-stroke`, 'line-opacity', alpha);
+          }
+          if (map.getLayer(`${layerId}-polygon-labels`)) {
+            map.setLayoutProperty(`${layerId}-polygon-labels`, 'visibility', visibility);
+            if (!isHidden) map.setPaintProperty(`${layerId}-polygon-labels`, 'text-opacity', 0.95);
+          }
         if (map.getLayer(`${layerId}-line`)) {
           map.setLayoutProperty(`${layerId}-line`, 'visibility', visibility);
           if (!isHidden) map.setPaintProperty(`${layerId}-line`, 'line-opacity', alpha);
