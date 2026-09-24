@@ -1215,6 +1215,7 @@ export default function MapViewer({
                 }
               }
             }
+                loadedLayersRef.current.set(layerId, { isVector: false, geomType: activeGeom, color, geojson: data });
           } catch (err) {
             console.error(`Failed to load layer ${layerId}:`, err);
           }
